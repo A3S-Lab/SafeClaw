@@ -1,0 +1,14 @@
+.markdown {
+    @apply [&>pre]:rounded-lg [&>pre]:border [&>pre]:bg-card [&>pre]:my-[8px] text-[14px];
+    .shiki-header {
+        @apply flex justify-between items-center py-[4px] px-[8px] border-b bg-gray-50 rounded-t-lg;
+        .language-label {
+            @apply font-bold;
+        }
+    }
+    .shiki-code {
+        .shiki {
+            @apply  rounded-b-lg py-[2px] px-[8px] text-wrap;
+        }
+    }
+}

@@ -1,0 +1,5 @@
+.container {
+	@apply mt-12;
+	height: calc(100% - 3rem);
+	width: 300px;
+}
