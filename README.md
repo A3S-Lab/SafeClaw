@@ -25,7 +25,7 @@
 
 ### What SafeClaw Does
 
-- **Multi-Channel Messaging**: Connect to Telegram, Slack, Discord, WebChat, and more
+- **Multi-Channel Messaging**: Connect to Telegram, Slack, Discord, WebChat, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), and more
 - **Privacy Classification**: Automatically detect sensitive data (credit cards, SSN, emails, API keys)
 - **TEE Processing**: Route sensitive computations to hardware-isolated A3S Box environments
 - **Secure Communication**: End-to-end encryption between gateway and TEE
@@ -113,7 +113,7 @@ Imagine you're a wealthy person who needs a personal assistant to help manage yo
 - **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM
 - **Automatic Classification**: Regex-based detection of PII and secrets
 - **Policy Engine**: Configurable rules for data routing decisions
-- **Multi-Channel Support**: Telegram, WebChat (Slack, Discord planned)
+- **Multi-Channel Support**: Telegram, WebChat, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), Slack, Discord
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Session Management**: Per-user sessions with sensitivity tracking
 
@@ -159,7 +159,10 @@ safeclaw config --default
 │  ┌─────────────────────────────────────────────────────────────┐   │
 │  │                    Channel Manager                           │   │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
-│  │  │ Telegram │ │  Slack   │ │ Discord  │ │   WebChat    │   │   │
+│  │  │ Telegram │ │  Feishu  │ │ DingTalk │ │    WeCom     │   │   │
+│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
+│  │  │  Slack   │ │ Discord  │ │ WebChat  │ │   Custom     │   │   │
 │  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
 │  └───────┼────────────┼────────────┼──────────────┼───────────┘   │
 │          └────────────┴────────────┴──────────────┘               │
@@ -775,45 +778,284 @@ general_worker_env = "ree"
 
 ## Configuration
 
-SafeClaw uses TOML configuration files. Default location: `~/.config/safeclaw/config.toml`
+SafeClaw uses JSON configuration files. Default location: `~/.safeclaw/config.json`
+
+### Configuration File Structure
+
+```
+~/.safeclaw/
+├── config.json          # Main configuration file
+├── credentials.json     # Encrypted credentials (auto-generated)
+├── channels/            # Channel-specific configurations
+│   ├── feishu.json
+│   ├── dingtalk.json
+│   └── wecom.json
+└── logs/                # Audit logs
+```
 
 ### Example Configuration
 
-```toml
-[gateway]
-host = "127.0.0.1"
-port = 18790
-tls_enabled = false
+```json
+{
+  "$schema": "https://safeclaw.dev/schema/config.json",
+  "version": "1.0",
 
-[tee]
-enabled = true
-backend = "a3s_box"
-box_image = "ghcr.io/a3s-lab/safeclaw-tee:latest"
-memory_mb = 2048
-cpu_cores = 2
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18790,
+    "tls": {
+      "enabled": false,
+      "cert_path": null,
+      "key_path": null
+    }
+  },
 
-[privacy]
-auto_classify = true
-default_level = "normal"
+  "tee": {
+    "enabled": true,
+    "backend": "a3s_box",
+    "box_image": "ghcr.io/a3s-lab/safeclaw-tee:latest",
+    "resources": {
+      "memory_mb": 2048,
+      "cpu_cores": 2
+    },
+    "distributed": {
+      "enabled": false,
+      "coordinator_model": "qwen3-8b",
+      "coordinator_quantization": "q4_k_m",
+      "workers": {
+        "secure_count": 2,
+        "general_count": 4
+      }
+    }
+  },
 
-[[privacy.rules]]
-name = "credit_card"
-pattern = '\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
-level = "highly_sensitive"
-description = "Credit card numbers"
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "app_id": "${FEISHU_APP_ID}",
+      "app_secret_ref": "feishu_app_secret",
+      "encrypt_key_ref": "feishu_encrypt_key",
+      "verification_token_ref": "feishu_verification_token",
+      "webhook_path": "/webhook/feishu"
+    },
+    "dingtalk": {
+      "enabled": true,
+      "app_key": "${DINGTALK_APP_KEY}",
+      "app_secret_ref": "dingtalk_app_secret",
+      "robot_code": "${DINGTALK_ROBOT_CODE}",
+      "webhook_path": "/webhook/dingtalk"
+    },
+    "wecom": {
+      "enabled": true,
+      "corp_id": "${WECOM_CORP_ID}",
+      "agent_id": "${WECOM_AGENT_ID}",
+      "secret_ref": "wecom_secret",
+      "token_ref": "wecom_token",
+      "encoding_aes_key_ref": "wecom_aes_key",
+      "webhook_path": "/webhook/wecom"
+    },
+    "telegram": {
+      "enabled": false,
+      "bot_token_ref": "telegram_bot_token",
+      "webhook_path": "/webhook/telegram"
+    },
+    "slack": {
+      "enabled": false,
+      "bot_token_ref": "slack_bot_token",
+      "signing_secret_ref": "slack_signing_secret",
+      "webhook_path": "/webhook/slack"
+    },
+    "discord": {
+      "enabled": false,
+      "bot_token_ref": "discord_bot_token",
+      "application_id": "${DISCORD_APP_ID}",
+      "webhook_path": "/webhook/discord"
+    },
+    "webchat": {
+      "enabled": true,
+      "cors_origins": ["http://localhost:3000"],
+      "websocket_path": "/ws"
+    }
+  },
 
-[[privacy.rules]]
-name = "api_key"
-pattern = '\b(sk-|api[_-]?key|token)[A-Za-z0-9_-]{20,}\b'
-level = "highly_sensitive"
-description = "API keys and tokens"
+  "privacy": {
+    "auto_classify": true,
+    "default_level": "normal",
+    "rules": [
+      {
+        "name": "credit_card",
+        "pattern": "\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+        "level": "highly_sensitive",
+        "description": "Credit card numbers"
+      },
+      {
+        "name": "api_key",
+        "pattern": "\\b(sk-|api[_-]?key|token)[A-Za-z0-9_-]{20,}\\b",
+        "level": "highly_sensitive",
+        "description": "API keys and tokens"
+      },
+      {
+        "name": "china_id_card",
+        "pattern": "\\b[1-9]\\d{5}(18|19|20)\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])\\d{3}[\\dXx]\\b",
+        "level": "highly_sensitive",
+        "description": "Chinese ID card numbers (身份证号)"
+      },
+      {
+        "name": "china_phone",
+        "pattern": "\\b1[3-9]\\d{9}\\b",
+        "level": "sensitive",
+        "description": "Chinese mobile phone numbers"
+      },
+      {
+        "name": "china_bank_card",
+        "pattern": "\\b[1-9]\\d{15,18}\\b",
+        "level": "highly_sensitive",
+        "description": "Chinese bank card numbers"
+      }
+    ]
+  },
 
-[models]
-default_provider = "anthropic"
+  "models": {
+    "default_provider": "anthropic",
+    "providers": {
+      "anthropic": {
+        "api_key_ref": "anthropic_api_key",
+        "default_model": "claude-sonnet-4-20250514",
+        "base_url": null
+      },
+      "openai": {
+        "api_key_ref": "openai_api_key",
+        "default_model": "gpt-4o",
+        "base_url": null
+      },
+      "qwen": {
+        "api_key_ref": "qwen_api_key",
+        "default_model": "qwen-max",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      },
+      "deepseek": {
+        "api_key_ref": "deepseek_api_key",
+        "default_model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com"
+      }
+    }
+  },
 
-[models.providers.anthropic]
-api_key_ref = "anthropic_api_key"
-default_model = "claude-sonnet-4-20250514"
+  "logging": {
+    "level": "info",
+    "audit": {
+      "enabled": true,
+      "path": "~/.safeclaw/logs/audit.log",
+      "retention_days": 30
+    }
+  }
+}
+```
+
+### Channel Configuration Details
+
+#### Feishu (飞书/Lark)
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "app_id": "cli_xxxxx",
+      "app_secret_ref": "feishu_app_secret",
+      "encrypt_key_ref": "feishu_encrypt_key",
+      "verification_token_ref": "feishu_verification_token",
+      "webhook_path": "/webhook/feishu",
+      "event_types": ["im.message.receive_v1"],
+      "permissions": ["im:message", "im:message:send_as_bot"]
+    }
+  }
+}
+```
+
+Setup steps:
+1. Create app at [Feishu Open Platform](https://open.feishu.cn/)
+2. Enable "Bot" capability
+3. Configure event subscription URL: `https://your-domain/webhook/feishu`
+4. Add required permissions: `im:message`, `im:message:send_as_bot`
+
+#### DingTalk (钉钉)
+
+```json
+{
+  "channels": {
+    "dingtalk": {
+      "enabled": true,
+      "app_key": "dingxxxxx",
+      "app_secret_ref": "dingtalk_app_secret",
+      "robot_code": "dingxxxxx",
+      "webhook_path": "/webhook/dingtalk",
+      "outgoing_token_ref": "dingtalk_outgoing_token",
+      "cool_app_code": null
+    }
+  }
+}
+```
+
+Setup steps:
+1. Create robot at [DingTalk Open Platform](https://open.dingtalk.com/)
+2. Configure HTTP callback URL: `https://your-domain/webhook/dingtalk`
+3. Enable "Outgoing" mode for receiving messages
+4. Note the Robot Code for API calls
+
+#### WeCom (企业微信)
+
+```json
+{
+  "channels": {
+    "wecom": {
+      "enabled": true,
+      "corp_id": "wwxxxxx",
+      "agent_id": "1000001",
+      "secret_ref": "wecom_secret",
+      "token_ref": "wecom_token",
+      "encoding_aes_key_ref": "wecom_aes_key",
+      "webhook_path": "/webhook/wecom",
+      "callback_url": "https://your-domain/webhook/wecom"
+    }
+  }
+}
+```
+
+Setup steps:
+1. Create application at [WeCom Admin Console](https://work.weixin.qq.com/)
+2. Configure "Receive Messages" API
+3. Set callback URL: `https://your-domain/webhook/wecom`
+4. Configure Token and EncodingAESKey for message encryption
+
+### Credential Management
+
+Sensitive credentials are stored separately and referenced by `*_ref` fields:
+
+```bash
+# Store credentials securely
+safeclaw credential set feishu_app_secret "your-secret"
+safeclaw credential set dingtalk_app_secret "your-secret"
+safeclaw credential set wecom_secret "your-secret"
+
+# List stored credentials
+safeclaw credential list
+
+# Credentials are encrypted and stored in ~/.safeclaw/credentials.json
+```
+
+### Environment Variable Support
+
+Configuration values can reference environment variables using `${VAR_NAME}` syntax:
+
+```json
+{
+  "channels": {
+    "feishu": {
+      "app_id": "${FEISHU_APP_ID}"
+    }
+  }
+}
 ```
 
 ### Privacy Classification Rules
@@ -861,12 +1103,17 @@ safeclaw/
 ├── src/
 │   ├── lib.rs              # Library entry point
 │   ├── main.rs             # CLI entry point
-│   ├── config.rs           # Configuration management
+│   ├── config.rs           # Configuration management (JSON)
 │   ├── error.rs            # Error types
 │   ├── channels/           # Multi-channel adapters
 │   │   ├── adapter.rs      # Channel adapter trait
 │   │   ├── message.rs      # Message types
 │   │   ├── telegram.rs     # Telegram adapter
+│   │   ├── feishu.rs       # Feishu (飞书) adapter
+│   │   ├── dingtalk.rs     # DingTalk (钉钉) adapter
+│   │   ├── wecom.rs        # WeCom (企业微信) adapter
+│   │   ├── slack.rs        # Slack adapter
+│   │   ├── discord.rs      # Discord adapter
 │   │   └── webchat.rs      # WebChat adapter
 │   ├── crypto/             # Cryptographic utilities
 │   │   ├── keys.rs         # Key management
@@ -903,6 +1150,9 @@ safeclaw/
 - [x] Channel adapter trait
 - [x] Telegram adapter (skeleton)
 - [x] WebChat adapter
+- [ ] **Feishu adapter (飞书)**: Event subscription, message send/receive
+- [ ] **DingTalk adapter (钉钉)**: Robot callback, outgoing messages
+- [ ] **WeCom adapter (企业微信)**: Application message, callback verification
 - [ ] Slack adapter
 - [ ] Discord adapter
 
