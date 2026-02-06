@@ -1,6 +1,9 @@
 //! Gateway server implementation
 
-use crate::channels::{ChannelAdapter, ChannelEvent, TelegramAdapter, WebChatAdapter};
+use crate::channels::{
+    ChannelAdapter, ChannelEvent, DingTalkAdapter, DiscordAdapter, FeishuAdapter, SlackAdapter,
+    TelegramAdapter, WebChatAdapter, WeComAdapter,
+};
 use crate::config::{SafeClawConfig, SensitivityLevel};
 use crate::error::{Error, Result};
 use crate::privacy::{Classifier, PolicyEngine};
@@ -164,6 +167,41 @@ impl Gateway {
             }
         }
 
+        // Initialize Feishu if configured
+        if let Some(feishu_config) = &self.config.channels.feishu {
+            let adapter = Arc::new(FeishuAdapter::new(feishu_config.clone()));
+            adapter.start(self.event_tx.clone()).await?;
+            channels.insert("feishu".to_string(), adapter);
+        }
+
+        // Initialize DingTalk if configured
+        if let Some(dingtalk_config) = &self.config.channels.dingtalk {
+            let adapter = Arc::new(DingTalkAdapter::new(dingtalk_config.clone()));
+            adapter.start(self.event_tx.clone()).await?;
+            channels.insert("dingtalk".to_string(), adapter);
+        }
+
+        // Initialize WeCom if configured
+        if let Some(wecom_config) = &self.config.channels.wecom {
+            let adapter = Arc::new(WeComAdapter::new(wecom_config.clone()));
+            adapter.start(self.event_tx.clone()).await?;
+            channels.insert("wecom".to_string(), adapter);
+        }
+
+        // Initialize Slack if configured
+        if let Some(slack_config) = &self.config.channels.slack {
+            let adapter = Arc::new(SlackAdapter::new(slack_config.clone()));
+            adapter.start(self.event_tx.clone()).await?;
+            channels.insert("slack".to_string(), adapter);
+        }
+
+        // Initialize Discord if configured
+        if let Some(discord_config) = &self.config.channels.discord {
+            let adapter = Arc::new(DiscordAdapter::new(discord_config.clone()));
+            adapter.start(self.event_tx.clone()).await?;
+            channels.insert("discord".to_string(), adapter);
+        }
+
         Ok(())
     }
 
@@ -272,6 +310,16 @@ impl Gateway {
     /// Get configuration
     pub fn config(&self) -> &SafeClawConfig {
         &self.config
+    }
+
+    /// Get active channel names
+    pub async fn active_channel_names(&self) -> Vec<String> {
+        self.channels.read().await.keys().cloned().collect()
+    }
+
+    /// Get channels map
+    pub fn channels(&self) -> &Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>> {
+        &self.channels
     }
 }
 

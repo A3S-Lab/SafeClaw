@@ -68,7 +68,7 @@ async fn get_status(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
         state: format!("{:?}", state),
         tee_enabled: gateway.config().tee.enabled,
         session_count,
-        channels: vec![], // TODO: Get active channels
+        channels: gateway.active_channel_names().await,
     })
 }
 
@@ -146,14 +146,41 @@ struct SendMessageResponse {
 
 /// Send a message
 async fn send_message(
-    State(_gateway): State<Arc<Gateway>>,
+    State(gateway): State<Arc<Gateway>>,
     Json(request): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
-    // TODO: Implement actual message sending
-    Json(SendMessageResponse {
-        message_id: uuid::Uuid::new_v4().to_string(),
-        status: "sent".to_string(),
-    })
+    let channels = gateway.channels().read().await;
+    if let Some(channel) = channels.get(&request.channel) {
+        let outbound = crate::channels::OutboundMessage::new(
+            &request.channel,
+            &request.chat_id,
+            &request.content,
+        );
+        match channel.send_message(outbound).await {
+            Ok(message_id) => (
+                StatusCode::OK,
+                Json(SendMessageResponse {
+                    message_id,
+                    status: "sent".to_string(),
+                }),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SendMessageResponse {
+                    message_id: String::new(),
+                    status: format!("error: {}", e),
+                }),
+            ),
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(SendMessageResponse {
+                message_id: String::new(),
+                status: format!("channel '{}' not found", request.channel),
+            }),
+        )
+    }
 }
 
 #[cfg(test)]

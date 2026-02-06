@@ -92,6 +92,15 @@ pub struct ChannelsConfig {
 
     /// WebChat channel config
     pub webchat: Option<WebChatConfig>,
+
+    /// Feishu (Lark) channel config
+    pub feishu: Option<FeishuConfig>,
+
+    /// DingTalk channel config
+    pub dingtalk: Option<DingTalkConfig>,
+
+    /// WeCom (WeChat Work) channel config
+    pub wecom: Option<WeComConfig>,
 }
 
 /// Telegram channel configuration
@@ -157,6 +166,72 @@ impl Default for WebChatConfig {
             allowed_origins: vec!["http://localhost:*".to_string()],
         }
     }
+}
+
+/// Feishu (Lark) channel configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeishuConfig {
+    /// App ID
+    pub app_id: String,
+
+    /// App secret reference (stored in TEE)
+    pub app_secret_ref: String,
+
+    /// Encrypt key reference for callback verification (stored in TEE)
+    pub encrypt_key_ref: String,
+
+    /// Verification token reference (stored in TEE)
+    pub verification_token_ref: String,
+
+    /// Allowed user open_ids (empty = all allowed)
+    pub allowed_users: Vec<String>,
+
+    /// DM policy: "pairing" or "open"
+    pub dm_policy: String,
+}
+
+/// DingTalk channel configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DingTalkConfig {
+    /// App key reference (stored in TEE)
+    pub app_key_ref: String,
+
+    /// App secret reference (stored in TEE)
+    pub app_secret_ref: String,
+
+    /// Robot code identifier
+    pub robot_code: String,
+
+    /// Allowed user staffIds (empty = all allowed)
+    pub allowed_users: Vec<String>,
+
+    /// DM policy: "pairing" or "open"
+    pub dm_policy: String,
+}
+
+/// WeCom (WeChat Work) channel configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeComConfig {
+    /// Corp ID
+    pub corp_id: String,
+
+    /// Agent ID
+    pub agent_id: u32,
+
+    /// Corp secret reference (stored in TEE)
+    pub secret_ref: String,
+
+    /// Encoding AES key reference for callback decryption (stored in TEE)
+    pub encoding_aes_key_ref: String,
+
+    /// Callback token reference (stored in TEE)
+    pub token_ref: String,
+
+    /// Allowed user IDs (empty = all allowed)
+    pub allowed_users: Vec<String>,
+
+    /// DM policy: "pairing" or "open"
+    pub dm_policy: String,
 }
 
 /// TEE configuration
@@ -498,5 +573,89 @@ mod tests {
         let rules = default_classification_rules();
         assert!(!rules.is_empty());
         assert!(rules.iter().any(|r| r.name == "credit_card"));
+    }
+
+    #[test]
+    fn test_feishu_config_serialize() {
+        let config = FeishuConfig {
+            app_id: "cli_test123".to_string(),
+            app_secret_ref: "feishu_secret".to_string(),
+            encrypt_key_ref: "feishu_encrypt".to_string(),
+            verification_token_ref: "feishu_token".to_string(),
+            allowed_users: vec!["ou_user1".to_string()],
+            dm_policy: "pairing".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: FeishuConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.app_id, "cli_test123");
+        assert_eq!(deserialized.allowed_users.len(), 1);
+    }
+
+    #[test]
+    fn test_dingtalk_config_serialize() {
+        let config = DingTalkConfig {
+            app_key_ref: "dt_key".to_string(),
+            app_secret_ref: "dt_secret".to_string(),
+            robot_code: "robot123".to_string(),
+            allowed_users: vec!["staff1".to_string(), "staff2".to_string()],
+            dm_policy: "open".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: DingTalkConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.robot_code, "robot123");
+        assert_eq!(deserialized.allowed_users.len(), 2);
+    }
+
+    #[test]
+    fn test_wecom_config_serialize() {
+        let config = WeComConfig {
+            corp_id: "ww_corp123".to_string(),
+            agent_id: 1000001,
+            secret_ref: "wc_secret".to_string(),
+            encoding_aes_key_ref: "wc_aes".to_string(),
+            token_ref: "wc_token".to_string(),
+            allowed_users: vec![],
+            dm_policy: "pairing".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: WeComConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.corp_id, "ww_corp123");
+        assert_eq!(deserialized.agent_id, 1000001);
+        assert!(deserialized.allowed_users.is_empty());
+    }
+
+    #[test]
+    fn test_channels_config_with_new_channels() {
+        let config = ChannelsConfig {
+            feishu: Some(FeishuConfig {
+                app_id: "cli_test".to_string(),
+                app_secret_ref: "secret".to_string(),
+                encrypt_key_ref: "encrypt".to_string(),
+                verification_token_ref: "token".to_string(),
+                allowed_users: vec![],
+                dm_policy: "open".to_string(),
+            }),
+            dingtalk: Some(DingTalkConfig {
+                app_key_ref: "key".to_string(),
+                app_secret_ref: "secret".to_string(),
+                robot_code: "robot".to_string(),
+                allowed_users: vec![],
+                dm_policy: "open".to_string(),
+            }),
+            wecom: Some(WeComConfig {
+                corp_id: "corp".to_string(),
+                agent_id: 100,
+                secret_ref: "secret".to_string(),
+                encoding_aes_key_ref: "aes".to_string(),
+                token_ref: "token".to_string(),
+                allowed_users: vec![],
+                dm_policy: "open".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert!(config.feishu.is_some());
+        assert!(config.dingtalk.is_some());
+        assert!(config.wecom.is_some());
+        assert!(config.telegram.is_none());
     }
 }
