@@ -9,113 +9,243 @@
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> •
-  <a href="#real-world-example">Real-World Example</a> •
+  <a href="#security-architecture">Security Architecture</a> •
+  <a href="#how-it-works">How It Works</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#security-design">Security Design</a> •
+  <a href="#configuration">Configuration</a> •
   <a href="#roadmap">Roadmap</a>
 </p>
 
 ---
 
-## Overview
+## The Problem: Your AI Assistant Knows Too Much
 
-**SafeClaw** is a secure version of [OpenClaw](https://github.com/openclaw/openclaw) built on the A3S ecosystem. It combines multi-channel messaging capabilities with hardware-isolated execution environments (TEE) for processing sensitive data.
+Imagine this scenario:
 
-### What SafeClaw Does
+```
+You: "Hey AI, help me pay my credit card bill.
+      My card number is 4111-1111-1111-1111 and the amount is $500."
 
-- **Multi-Channel Messaging**: Connect to Telegram, Slack, Discord, WebChat, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), and more
-- **Privacy Classification**: Automatically detect sensitive data (credit cards, SSN, emails, API keys)
-- **TEE Processing**: Route sensitive computations to hardware-isolated A3S Box environments
-- **Secure Communication**: End-to-end encryption between gateway and TEE
+AI: "Sure! I'll process that payment for you..."
+```
 
-### What SafeClaw Does NOT Do
+**What you don't see:**
+- Your credit card number is stored in server memory (plaintext)
+- Server administrators can access it
+- A hacker who breaches the server can steal it
+- The AI provider's logs might contain it
+- Even "deleted" data may persist in memory dumps
 
-- Replace your existing AI assistant (it enhances privacy protection)
-- Store sensitive data in plaintext (everything is encrypted)
-- Process highly sensitive data outside TEE (configurable policy)
+**This is the reality of most AI assistants today.** Your sensitive data is exposed the moment you share it.
 
-## Real-World Example
+## The Solution: Bank Vault Security for AI
 
-### The Bank Vault Analogy
+**SafeClaw** puts your AI assistant inside a hardware-enforced "bank vault" called TEE (Trusted Execution Environment).
 
-Imagine you're a wealthy person who needs a personal assistant to help manage your finances. Here's how different approaches compare:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Traditional AI vs SafeClaw                                │
+│                                                                              │
+│  ┌─────────────────────────────────┐  ┌─────────────────────────────────┐   │
+│  │     Traditional AI Assistant    │  │      SafeClaw with TEE          │   │
+│  │                                 │  │                                 │   │
+│  │  ┌───────────────────────────┐  │  │  ┌───────────────────────────┐  │   │
+│  │  │      Server Memory        │  │  │  │   TEE (Hardware Vault)    │  │   │
+│  │  │                           │  │  │  │   ┌───────────────────┐   │  │   │
+│  │  │  Credit Card: 4111-1111.. │  │  │  │   │ Credit Card: ****  │   │  │   │
+│  │  │  Password: secret123      │  │  │  │   │ Password: ******   │   │  │   │
+│  │  │  SSN: 123-45-6789         │  │  │  │   │ SSN: ***-**-****   │   │  │   │
+│  │  │                           │  │  │  │   │                    │   │  │   │
+│  │  │  ⚠️ Visible to:           │  │  │  │   │ 🔒 Visible to:     │   │  │   │
+│  │  │  - Server admins          │  │  │  │   │ - NO ONE           │   │  │   │
+│  │  │  - Hackers                │  │  │  │   │ - Not even admins  │   │  │   │
+│  │  │  - Memory dumps           │  │  │  │   │ - Hardware enforced│   │  │   │
+│  │  └───────────────────────────┘  │  │  │   └───────────────────┘   │  │   │
+│  │                                 │  │  └───────────────────────────┘  │   │
+│  └─────────────────────────────────┘  └─────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-**Traditional AI Assistant (OpenClaw without TEE):**
-> Like hiring an assistant who works in a regular office. They're trustworthy, but anyone who breaks into the office could see your financial documents on their desk.
+## Security Architecture
 
-**SafeClaw with TEE:**
-> Like hiring an assistant who works inside a bank vault. Even if someone breaks into the building, they can't access the vault. Your assistant processes all sensitive documents inside the vault, and only brings out the non-sensitive results.
+### System Security: Defense in Depth
 
-### A Concrete Scenario
+SafeClaw implements **4 layers of security** to protect your data:
 
-**You:** "Hey AI, help me pay my credit card bill. My card number is 4111-1111-1111-1111 and the amount is $500."
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        System Security Architecture                          │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │  Layer 4: Application Security                                         │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+│  │  │   Privacy    │ │   Policy     │ │   Audit      │ │   Session    │  │ │
+│  │  │  Classifier  │ │   Engine     │ │   Logging    │ │  Isolation   │  │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘  │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                         │
+│  ┌────────────────────────────────▼───────────────────────────────────────┐ │
+│  │  Layer 3: Protocol Security                                            │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+│  │  │   Message    │ │   Replay     │ │   Version    │ │   Taint      │  │ │
+│  │  │   Auth (MAC) │ │  Protection  │ │   Binding    │ │  Tracking    │  │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘  │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                         │
+│  ┌────────────────────────────────▼───────────────────────────────────────┐ │
+│  │  Layer 2: Channel Security                                             │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+│  │  │   X25519     │ │  AES-256-GCM │ │   Forward    │ │   Network    │  │ │
+│  │  │   Key Exch   │ │  Encryption  │ │   Secrecy    │ │   Firewall   │  │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘  │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                    │                                         │
+│  ┌────────────────────────────────▼───────────────────────────────────────┐ │
+│  │  Layer 1: Hardware Security (TEE)                                      │ │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │ │
+│  │  │   Memory     │ │   Remote     │ │   Sealed     │ │   CPU-level  │  │ │
+│  │  │  Isolation   │ │ Attestation  │ │   Storage    │ │  Encryption  │  │ │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘  │ │
+│  │                                                                        │ │
+│  │  Supported: Intel SGX | AMD SEV-SNP | ARM CCA | Apple Secure Enclave  │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-**What happens behind the scenes:**
+### Data Security: Zero Trust Data Flow
+
+Your sensitive data follows a **strict security path** - never exposed outside the TEE:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Data Security Architecture                           │
+│                                                                              │
+│  User Input: "Pay $500 with card 4111-1111-1111-1111"                       │
+│       │                                                                      │
+│       ▼                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  ZONE 1: Untrusted (Gateway)                                        │    │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │    │
+│  │  │  Privacy Classifier                                            │  │    │
+│  │  │  - Detect: "4111-1111-1111-1111" = Credit Card                │  │    │
+│  │  │  - Classification: HIGHLY_SENSITIVE                           │  │    │
+│  │  │  - Action: Route to TEE (data NOT stored here)                │  │    │
+│  │  └───────────────────────────────────────────────────────────────┘  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│       │                                                                      │
+│       │ Encrypted Channel (AES-256-GCM)                                     │
+│       │ Only TEE can decrypt                                                │
+│       ▼                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  ZONE 2: Trusted (TEE - Hardware Isolated)                          │    │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │    │
+│  │  │  Secure Processing                                             │  │    │
+│  │  │  - Decrypt message (only possible inside TEE)                 │  │    │
+│  │  │  - Process: "4111-1111-1111-1111" visible ONLY here           │  │    │
+│  │  │  - AI processes payment request                               │  │    │
+│  │  │  - Generate safe response                                     │  │    │
+│  │  └───────────────────────────────────────────────────────────────┘  │    │
+│  │  ┌───────────────────────────────────────────────────────────────┐  │    │
+│  │  │  Output Sanitizer                                              │  │    │
+│  │  │  - Scan output for sensitive data                             │  │    │
+│  │  │  - Redact: "4111-1111-1111-1111" → "****-****-****-1111"      │  │    │
+│  │  │  - Verify no leakage before sending                           │  │    │
+│  │  └───────────────────────────────────────────────────────────────┘  │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│       │                                                                      │
+│       ▼                                                                      │
+│  Safe Output: "Payment of $500 to card ending in 1111 completed"            │
+│                                                                              │
+│  ✅ Full card number NEVER left the TEE                                     │
+│  ✅ Gateway only saw encrypted data                                         │
+│  ✅ Server admins cannot access the card number                             │
+│  ✅ Even if server is hacked, card number is safe                           │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Threat Protection Matrix
+
+| Threat | Without SafeClaw | With SafeClaw TEE |
+|--------|------------------|-------------------|
+| **Server Breach** | ❌ Attacker reads data in memory | ✅ Data encrypted, hardware prevents access |
+| **Malicious Admin** | ❌ Admin can access all data | ✅ Even admins cannot peek inside TEE |
+| **Memory Dump** | ❌ Sensitive data exposed | ✅ TEE memory is isolated and encrypted |
+| **Man-in-the-Middle** | ❌ Possible if encryption weak | ✅ End-to-end encryption + attestation |
+| **AI Data Leakage** | ❌ AI could expose data in output | ✅ Output sanitizer blocks leakage |
+| **Cross-Session Attack** | ❌ Data may leak between users | ✅ Strict session isolation + memory wipe |
+
+---
+
+## How It Works
+
+### Real-World Example: The Bank Vault
+
+Think of SafeClaw like a **bank vault** for your AI assistant:
+
+| Scenario | Traditional AI | SafeClaw |
+|----------|---------------|----------|
+| Where AI works | Regular office (anyone can peek) | Inside a bank vault (hardware-locked) |
+| Who can see your data | Server admins, hackers, logs | Only the AI inside the vault |
+| What leaves the vault | Everything (including secrets) | Only safe, redacted results |
+
+### Step-by-Step: What Happens When You Send a Message
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  Step 1: Privacy Classification                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  Your message arrives at SafeClaw Gateway                        │   │
-│  │  Privacy Classifier detects: "4111-1111-1111-1111" = Credit Card │   │
-│  │  Classification: HIGHLY_SENSITIVE                                │   │
-│  │  Decision: Route to TEE for processing                           │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  You: "My password is secret123, help me login to my bank"              │
 │                                                                         │
-│  Step 2: Secure Channel                                                 │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  Gateway encrypts your message with session key                  │   │
-│  │  Only the TEE can decrypt it (hardware-enforced)                 │   │
-│  │  Even if hackers intercept the data, they see only gibberish     │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  Step 1: Classification                                                 │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  SafeClaw detects "secret123" after "password is" = SENSITIVE     │ │
+│  │  Decision: Process in TEE                                         │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
-│  Step 3: TEE Processing (Inside the "Bank Vault")                       │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  Your credit card number is decrypted ONLY inside the TEE        │   │
-│  │  AI processes your request in hardware-isolated memory           │   │
-│  │  No one - not even the server admin - can peek inside            │   │
-│  │  The payment is processed securely                               │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  Step 2: Secure Transfer                                                │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  Message encrypted → Only TEE can decrypt                         │ │
+│  │  Interceptors see: "a7f3b2c1e9d8..." (gibberish)                 │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+│  Step 3: TEE Processing                                                 │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  Inside hardware vault:                                           │ │
+│  │  - "secret123" decrypted and processed                           │ │
+│  │  - AI helps with login                                           │ │
+│  │  - Password NEVER leaves this vault                              │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
 │                                                                         │
 │  Step 4: Safe Response                                                  │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  AI responds: "Payment of $500 to card ending in 1111 complete"  │   │
-│  │  Your full card number NEVER leaves the TEE                      │   │
-│  │  Only the safe, redacted response is sent back to you            │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  Output sanitizer checks response                                 │ │
+│  │  Blocks: "Your password secret123 was used" ❌                   │ │
+│  │  Allows: "Login successful" ✅                                   │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+│  AI Response: "I've helped you login successfully."                    │
+│  (Your password "secret123" was NEVER exposed)                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why This Matters
-
-| Threat | Without TEE | With SafeClaw TEE |
-|--------|-------------|-------------------|
-| Server breach | Attacker can read your data in memory | Data is encrypted, hardware prevents access |
-| Malicious admin | Admin could potentially access data | Even admins cannot peek inside TEE |
-| Memory dump attack | Sensitive data exposed | TEE memory is isolated and encrypted |
-| Man-in-the-middle | Possible if encryption is weak | End-to-end encryption + attestation |
-
 ### More Examples
 
-**Medical Information:**
-> "My blood type is O+ and I'm allergic to penicillin" → Processed in TEE, never exposed
+| Your Message | What's Protected | What AI Returns |
+|--------------|------------------|-----------------|
+| "My card is 4111-1111-1111-1111, pay $500" | Full card number | "Payment to card ****1111 complete" |
+| "My SSN is 123-45-6789, file my taxes" | Social Security Number | "Tax return filed for SSN ***-**-6789" |
+| "Use API key sk-abc123xyz to call OpenAI" | API key | "Image generated successfully" |
+| "My medical record shows diabetes" | Medical information | "I've noted your health condition" |
 
-**API Keys:**
-> "Use my OpenAI key sk-abc123... to generate an image" → Key stays in TEE, only the image comes out
-
-**Personal Identity:**
-> "My SSN is 123-45-6789, help me file taxes" → SSN processed in TEE, tax forms generated safely
+---
 
 ## Features
 
-- **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM
-- **Automatic Classification**: Regex-based detection of PII and secrets
-- **Policy Engine**: Configurable rules for data routing decisions
-- **Multi-Channel Support**: Telegram, WebChat, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), Slack, Discord
+- **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM with TEE
+- **Automatic Classification**: Detect PII, credentials, and secrets automatically
+- **Multi-Channel Support**: Telegram, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), Slack, Discord, WebChat
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
-- **Session Management**: Per-user sessions with sensitivity tracking
+- **Output Sanitization**: Prevent AI from leaking sensitive data in responses
+- **Session Isolation**: Strict memory isolation between users
+- **Distributed TEE**: Split sensitive tasks across multiple isolated environments
 
 ## Quick Start
 
@@ -151,7 +281,11 @@ safeclaw doctor
 safeclaw config --default
 ```
 
-## Architecture
+## Technical Architecture
+
+> For a high-level overview of security architecture, see [Security Architecture](#security-architecture) above.
+
+### System Components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -197,9 +331,11 @@ safeclaw config --default
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-## Security Design
+## Security Design Details
 
-SafeClaw implements multiple layers of security to protect sensitive data. This section describes the security architecture and planned enhancements.
+> This section provides in-depth technical details. For a quick overview, see [Security Architecture](#security-architecture) above.
+
+SafeClaw implements multiple layers of security to protect sensitive data.
 
 ### Security Principles
 
