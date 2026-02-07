@@ -6,7 +6,7 @@ use crate::crypto::SecureChannel;
 use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{oneshot, RwLock};
 
 /// Client for communicating with TEE environment
 pub struct TeeClient {
@@ -40,7 +40,7 @@ impl TeeClient {
         }
 
         // Start handshake
-        let handshake_init = self.secure_channel.start_handshake().await?;
+        let _handshake_init = self.secure_channel.start_handshake().await?;
 
         // In a real implementation, this would:
         // 1. Connect to the A3S Box via vsock
@@ -75,7 +75,7 @@ impl TeeClient {
         let request_id = request.id.clone();
 
         // Create response channel
-        let (tx, rx) = oneshot::channel();
+        let (tx, _rx) = oneshot::channel();
         self.pending_requests
             .write()
             .await
@@ -83,7 +83,7 @@ impl TeeClient {
 
         // Serialize and encrypt request
         let message = TeeMessage::Request(request);
-        let serialized = serde_json::to_vec(&message)
+        let _serialized = serde_json::to_vec(&message)
             .map_err(|e| Error::Tee(format!("Failed to serialize request: {}", e)))?;
 
         // In a real implementation, send via vsock

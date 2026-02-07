@@ -442,23 +442,25 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
 
     // Step 5: Build and write config
     println!("--- Step 5: Writing Configuration ---");
-    let mut config = SafeClawConfig::default();
-    config.gateway = GatewayConfig {
-        host,
-        port,
-        ..GatewayConfig::default()
-    };
-    config.tee = TeeConfig {
-        enabled: tee_enabled,
-        backend: tee_backend,
-        memory_mb,
-        cpu_cores,
-        ..TeeConfig::default()
-    };
-    config.channels = channels;
-    config.models = ModelsConfig {
-        default_provider: provider,
-        providers,
+    let config = SafeClawConfig {
+        gateway: GatewayConfig {
+            host,
+            port,
+            ..GatewayConfig::default()
+        },
+        tee: TeeConfig {
+            enabled: tee_enabled,
+            backend: tee_backend,
+            memory_mb,
+            cpu_cores,
+            ..TeeConfig::default()
+        },
+        channels,
+        models: ModelsConfig {
+            default_provider: provider,
+            providers,
+        },
+        ..Default::default()
     };
 
     let toml_str =
@@ -772,32 +774,6 @@ mod tests {
     #[test]
     fn test_build_config_from_wizard() {
         // Simulate building config from wizard values
-        let mut config = SafeClawConfig::default();
-
-        config.gateway = GatewayConfig {
-            host: "0.0.0.0".to_string(),
-            port: 9090,
-            ..GatewayConfig::default()
-        };
-
-        config.tee = TeeConfig {
-            enabled: true,
-            backend: TeeBackend::IntelSgx,
-            memory_mb: 4096,
-            cpu_cores: 4,
-            ..TeeConfig::default()
-        };
-
-        config.channels = ChannelsConfig {
-            telegram: Some(TelegramConfig {
-                bot_token_ref: "my_tg_token".to_string(),
-                allowed_users: vec![12345],
-                dm_policy: "pairing".to_string(),
-            }),
-            webchat: Some(WebChatConfig::default()),
-            ..Default::default()
-        };
-
         let mut providers = HashMap::new();
         providers.insert(
             "anthropic".to_string(),
@@ -808,9 +784,34 @@ mod tests {
                 models: vec!["claude-sonnet-4-20250514".to_string()],
             },
         );
-        config.models = ModelsConfig {
-            default_provider: "anthropic".to_string(),
-            providers,
+
+        let config = SafeClawConfig {
+            gateway: GatewayConfig {
+                host: "0.0.0.0".to_string(),
+                port: 9090,
+                ..GatewayConfig::default()
+            },
+            tee: TeeConfig {
+                enabled: true,
+                backend: TeeBackend::IntelSgx,
+                memory_mb: 4096,
+                cpu_cores: 4,
+                ..TeeConfig::default()
+            },
+            channels: ChannelsConfig {
+                telegram: Some(TelegramConfig {
+                    bot_token_ref: "my_tg_token".to_string(),
+                    allowed_users: vec![12345],
+                    dm_policy: "pairing".to_string(),
+                }),
+                webchat: Some(WebChatConfig::default()),
+                ..Default::default()
+            },
+            models: ModelsConfig {
+                default_provider: "anthropic".to_string(),
+                providers,
+            },
+            ..Default::default()
         };
 
         // Verify serialization round-trip

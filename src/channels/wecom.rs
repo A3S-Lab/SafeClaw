@@ -34,7 +34,7 @@ impl WeComAdapter {
 
     /// Verify callback URL (sort token, timestamp, nonce; SHA-256 hash; compare with signature)
     pub fn verify_callback(token: &str, timestamp: &str, nonce: &str, signature: &str) -> bool {
-        let mut parts = vec![token, timestamp, nonce];
+        let mut parts = [token, timestamp, nonce];
         parts.sort();
         let combined = parts.join("");
 
@@ -201,7 +201,7 @@ mod tests {
         let nonce = "abc123";
 
         // Compute expected signature
-        let mut parts = vec![token, timestamp, nonce];
+        let mut parts = [token, timestamp, nonce];
         parts.sort();
         let combined = parts.join("");
         let mut hasher = Sha256::new();

@@ -4,7 +4,7 @@ use crate::channels::{
     ChannelAdapter, ChannelEvent, DingTalkAdapter, DiscordAdapter, FeishuAdapter, SlackAdapter,
     TelegramAdapter, WebChatAdapter, WeComAdapter,
 };
-use crate::config::{SafeClawConfig, SensitivityLevel};
+use crate::config::SafeClawConfig;
 use crate::error::{Error, Result};
 use crate::privacy::{Classifier, PolicyEngine};
 use crate::session::{SessionManager, SessionRouter};

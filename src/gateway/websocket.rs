@@ -1,7 +1,6 @@
 //! WebSocket handler for real-time communication
 
-use crate::channels::{InboundMessage, OutboundMessage, WebChatAdapter};
-use crate::error::{Error, Result};
+use crate::channels::{InboundMessage, OutboundMessage};
 use crate::gateway::Gateway;
 use axum::{
     extract::{
@@ -35,6 +34,7 @@ pub enum WsMessage {
 
 /// WebSocket handler
 pub struct WebSocketHandler {
+    #[allow(dead_code)]
     gateway: Arc<Gateway>,
 }
 
@@ -67,18 +67,18 @@ impl WebSocketHandler {
             session_id: session_id.clone(),
         };
         if let Ok(json) = serde_json::to_string(&connected_msg) {
-            let _ = sender.send(Message::Text(json.into())).await;
+            let _ = sender.send(Message::Text(json)).await;
         }
 
         // Spawn task to forward outbound messages
-        let session_id_clone = session_id.clone();
+        let _session_id_clone = session_id.clone();
         let send_task = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 let ws_msg = WsMessage::Message {
                     content: msg.content,
                 };
                 if let Ok(json) = serde_json::to_string(&ws_msg) {
-                    if sender.send(Message::Text(json.into())).await.is_err() {
+                    if sender.send(Message::Text(json)).await.is_err() {
                         break;
                     }
                 }

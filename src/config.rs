@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Main SafeClaw configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SafeClawConfig {
     /// Gateway configuration
     pub gateway: GatewayConfig,
@@ -24,19 +24,6 @@ pub struct SafeClawConfig {
 
     /// Storage configuration
     pub storage: StorageConfig,
-}
-
-impl Default for SafeClawConfig {
-    fn default() -> Self {
-        Self {
-            gateway: GatewayConfig::default(),
-            channels: ChannelsConfig::default(),
-            tee: TeeConfig::default(),
-            privacy: PrivacyConfig::default(),
-            models: ModelsConfig::default(),
-            storage: StorageConfig::default(),
-        }
-    }
 }
 
 /// Gateway configuration

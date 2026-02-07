@@ -1,7 +1,7 @@
 //! Session management
 
 use crate::config::SensitivityLevel;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

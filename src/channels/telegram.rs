@@ -1,7 +1,7 @@
 //! Telegram channel adapter
 
 use super::adapter::{AdapterBase, AdapterStatus, ChannelAdapter, ChannelEvent};
-use super::message::{InboundMessage, OutboundMessage};
+use super::message::OutboundMessage;
 use crate::config::TelegramConfig;
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 /// Telegram channel adapter
 pub struct TelegramAdapter {
+    #[allow(dead_code)]
     config: TelegramConfig,
     base: AdapterBase,
     event_tx: Arc<tokio::sync::RwLock<Option<mpsc::Sender<ChannelEvent>>>>,
@@ -26,11 +27,13 @@ impl TelegramAdapter {
     }
 
     /// Check if a user is allowed
+    #[allow(dead_code)]
     fn is_user_allowed(&self, user_id: i64) -> bool {
         self.config.allowed_users.is_empty() || self.config.allowed_users.contains(&user_id)
     }
 
     /// Handle incoming update (placeholder for actual Telegram API integration)
+    #[allow(dead_code)]
     async fn handle_update(&self, _update: serde_json::Value) -> Result<()> {
         // In a real implementation, this would:
         // 1. Parse the Telegram update

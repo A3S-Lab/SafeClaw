@@ -1,10 +1,9 @@
 //! Session routing based on privacy classification
 
 use crate::channels::InboundMessage;
-use crate::config::SensitivityLevel;
 use crate::error::Result;
 use crate::privacy::{Classifier, ClassificationResult, PolicyDecision, PolicyEngine};
-use crate::session::{Session, SessionManager};
+use crate::session::SessionManager;
 use crate::tee::TeeManager;
 use std::sync::Arc;
 
@@ -127,14 +126,13 @@ impl SessionRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PrivacyConfig, TeeConfig};
+    use crate::config::{PrivacyConfig, SensitivityLevel, TeeConfig};
     use crate::privacy::Classifier;
 
     fn create_test_router() -> SessionRouter {
         let session_manager = Arc::new(SessionManager::new());
         // Disable TEE for tests to avoid connection requirements
-        let mut tee_config = TeeConfig::default();
-        tee_config.enabled = false;
+        let tee_config = TeeConfig { enabled: false, ..Default::default() };
         let tee_manager = Arc::new(TeeManager::new(tee_config));
         let privacy_config = PrivacyConfig::default();
         let classifier = Arc::new(

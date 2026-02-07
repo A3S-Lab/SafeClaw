@@ -1,7 +1,7 @@
 //! Secure channel for encrypted communication with TEE
 
-use super::{decrypt, encrypt, generate_key, KEY_SIZE};
-use crate::crypto::keys::{EphemeralKeyPair, PublicKey, SecretKey};
+use super::{decrypt, encrypt, KEY_SIZE};
+use crate::crypto::keys::{PublicKey, SecretKey};
 use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

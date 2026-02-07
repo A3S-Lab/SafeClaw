@@ -8,5 +8,3 @@ mod policy;
 
 pub use classifier::{Classifier, ClassificationResult, Match};
 pub use policy::{DataPolicy, PolicyDecision, PolicyEngine};
-
-use crate::config::SensitivityLevel;

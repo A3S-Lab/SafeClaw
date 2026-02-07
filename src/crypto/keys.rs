@@ -1,6 +1,5 @@
 //! Key management for secure communication
 
-use crate::error::{Error, Result};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, ReusableSecret};
@@ -71,11 +70,13 @@ impl KeyPair {
 }
 
 /// Ephemeral key pair for one-time key exchange
+#[allow(dead_code)]
 pub struct EphemeralKeyPair {
     secret: EphemeralSecret,
     public: X25519PublicKey,
 }
 
+#[allow(dead_code)]
 impl EphemeralKeyPair {
     /// Generate a new ephemeral key pair
     pub fn generate() -> Self {

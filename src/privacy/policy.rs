@@ -1,7 +1,6 @@
 //! Privacy policy engine for data routing decisions
 
 use crate::config::SensitivityLevel;
-use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -128,10 +127,12 @@ impl Default for PolicyEngine {
 }
 
 /// Builder for creating custom policies
+#[allow(dead_code)]
 pub struct PolicyBuilder {
     policy: DataPolicy,
 }
 
+#[allow(dead_code)]
 impl PolicyBuilder {
     /// Create a new policy builder
     pub fn new(name: impl Into<String>) -> Self {

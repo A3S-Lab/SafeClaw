@@ -1,6 +1,5 @@
 //! HTTP API handler
 
-use crate::error::{Error, Result};
 use crate::gateway::Gateway;
 use axum::{
     extract::State,
@@ -14,6 +13,7 @@ use std::sync::Arc;
 
 /// API handler for HTTP endpoints
 pub struct ApiHandler {
+    #[allow(dead_code)]
     gateway: Arc<Gateway>,
 }
 
@@ -186,7 +186,6 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::GatewayBuilder;
 
     #[tokio::test]
     async fn test_health_check() {

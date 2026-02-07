@@ -3,7 +3,6 @@
 use crate::config::{ClassificationRule, SensitivityLevel};
 use crate::error::{Error, Result};
 use regex::Regex;
-use std::collections::HashMap;
 
 /// Classification result for a piece of data
 #[derive(Debug, Clone)]
@@ -41,6 +40,7 @@ struct CompiledRule {
     name: String,
     pattern: Regex,
     level: SensitivityLevel,
+    #[allow(dead_code)]
     description: String,
 }
 

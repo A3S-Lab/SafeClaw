@@ -119,6 +119,7 @@ pub enum TeeResponseStatus {
 }
 
 /// Payload for InitSession request
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitSessionPayload {
     /// User identifier
@@ -132,6 +133,7 @@ pub struct InitSessionPayload {
 }
 
 /// Model configuration for TEE session
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfigPayload {
     /// Provider name
@@ -143,6 +145,7 @@ pub struct ModelConfigPayload {
 }
 
 /// Session options
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionOptions {
     /// Enable conversation history
@@ -156,6 +159,7 @@ pub struct SessionOptions {
 }
 
 /// Payload for ProcessMessage request
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessMessagePayload {
     /// User message content
@@ -167,6 +171,7 @@ pub struct ProcessMessagePayload {
 }
 
 /// Attachment in a message
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentPayload {
     /// Attachment type
@@ -178,6 +183,7 @@ pub struct AttachmentPayload {
 }
 
 /// Payload for tool execution
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecuteToolPayload {
     /// Tool name
@@ -189,6 +195,7 @@ pub struct ExecuteToolPayload {
 }
 
 /// Payload for secret storage
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreSecretPayload {
     /// Secret key/name
