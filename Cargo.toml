@@ -19,11 +19,11 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal A3S crates
-a3s-tools-core = { path = "../tools-core" }
-a3s-lane = { path = "../lane" }
-a3s-cron = { path = "../cron" }
-a3s-code = { path = "../code" }
-a3s_context = { path = "../context" }
+a3s-tools-core = { version = "0.1", path = "../tools-core" }
+a3s-lane = { version = "0.1", path = "../lane" }
+a3s-cron = { version = "0.1", path = "../cron" }
+a3s-code = { version = "0.1", path = "../code" }
+a3s_context = { version = "0.1", path = "../context" }
 
 # Regex for privacy classification
 regex = "1.10"
