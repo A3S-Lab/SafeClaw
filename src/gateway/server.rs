@@ -2,7 +2,7 @@
 
 use crate::channels::{
     ChannelAdapter, ChannelEvent, DingTalkAdapter, DiscordAdapter, FeishuAdapter, SlackAdapter,
-    TelegramAdapter, WebChatAdapter, WeComAdapter,
+    TelegramAdapter, WeComAdapter, WebChatAdapter,
 };
 use crate::config::SafeClawConfig;
 use crate::error::{Error, Result};
@@ -47,11 +47,8 @@ impl Gateway {
         let tee_manager = Arc::new(TeeManager::new(config.tee.clone()));
 
         let classifier = Arc::new(
-            Classifier::new(
-                config.privacy.rules.clone(),
-                config.privacy.default_level,
-            )
-            .expect("Failed to create classifier"),
+            Classifier::new(config.privacy.rules.clone(), config.privacy.default_level)
+                .expect("Failed to create classifier"),
         );
         let policy_engine = Arc::new(PolicyEngine::new());
 

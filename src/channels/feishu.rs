@@ -148,11 +148,7 @@ impl ChannelAdapter for FeishuAdapter {
         }
 
         // In a real implementation, DELETE message via Feishu API
-        tracing::debug!(
-            "Deleting Feishu message {} in chat {}",
-            message_id,
-            chat_id
-        );
+        tracing::debug!("Deleting Feishu message {} in chat {}", message_id, chat_id);
 
         Ok(())
     }

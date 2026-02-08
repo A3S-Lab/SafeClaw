@@ -75,7 +75,9 @@ impl SecureChannel {
     pub async fn complete_handshake(&self, remote_public_bytes: &[u8; 32]) -> Result<()> {
         let mut state = self.state.write().await;
         if *state != ChannelState::Handshaking {
-            return Err(Error::Crypto("Channel not in handshaking state".to_string()));
+            return Err(Error::Crypto(
+                "Channel not in handshaking state".to_string(),
+            ));
         }
 
         let remote_public = PublicKey::from_bytes(remote_public_bytes);

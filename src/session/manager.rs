@@ -190,7 +190,10 @@ impl SessionManager {
             .write()
             .await
             .insert(session_id.clone(), session.clone());
-        self.user_sessions.write().await.insert(user_key, session_id);
+        self.user_sessions
+            .write()
+            .await
+            .insert(user_key, session_id);
 
         tracing::info!(
             "Created session {} for user {} on {}:{}",
@@ -340,12 +343,20 @@ mod tests {
 
         assert_eq!(session.sensitivity_level().await, SensitivityLevel::Normal);
 
-        session.update_sensitivity(SensitivityLevel::Sensitive).await;
-        assert_eq!(session.sensitivity_level().await, SensitivityLevel::Sensitive);
+        session
+            .update_sensitivity(SensitivityLevel::Sensitive)
+            .await;
+        assert_eq!(
+            session.sensitivity_level().await,
+            SensitivityLevel::Sensitive
+        );
 
         // Should not decrease
         session.update_sensitivity(SensitivityLevel::Normal).await;
-        assert_eq!(session.sensitivity_level().await, SensitivityLevel::Sensitive);
+        assert_eq!(
+            session.sensitivity_level().await,
+            SensitivityLevel::Sensitive
+        );
     }
 
     #[tokio::test]

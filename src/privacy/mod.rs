@@ -6,5 +6,5 @@
 mod classifier;
 mod policy;
 
-pub use classifier::{Classifier, ClassificationResult, Match};
+pub use classifier::{ClassificationResult, Classifier, Match};
 pub use policy::{DataPolicy, PolicyDecision, PolicyEngine};

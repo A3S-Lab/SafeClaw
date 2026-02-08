@@ -115,9 +115,10 @@ impl TeeClient {
 
         match response.status {
             TeeResponseStatus::Success => Ok(()),
-            TeeResponseStatus::Error { code, message } => {
-                Err(Error::Tee(format!("Init session failed: {} ({})", message, code)))
-            }
+            TeeResponseStatus::Error { code, message } => Err(Error::Tee(format!(
+                "Init session failed: {} ({})",
+                message, code
+            ))),
             TeeResponseStatus::Pending => Ok(()), // Async init
         }
     }
@@ -143,12 +144,11 @@ impl TeeClient {
                     .map_err(|e| Error::Tee(format!("Failed to parse response: {}", e)))?;
                 Ok(result["content"].as_str().unwrap_or("").to_string())
             }
-            TeeResponseStatus::Error { code, message } => {
-                Err(Error::Tee(format!("Process message failed: {} ({})", message, code)))
-            }
-            TeeResponseStatus::Pending => {
-                Err(Error::Tee("Unexpected pending status".to_string()))
-            }
+            TeeResponseStatus::Error { code, message } => Err(Error::Tee(format!(
+                "Process message failed: {} ({})",
+                message, code
+            ))),
+            TeeResponseStatus::Pending => Err(Error::Tee("Unexpected pending status".to_string())),
         }
     }
 
@@ -169,9 +169,10 @@ impl TeeClient {
 
         match response.status {
             TeeResponseStatus::Success => Ok(()),
-            TeeResponseStatus::Error { code, message } => {
-                Err(Error::Tee(format!("Store secret failed: {} ({})", message, code)))
-            }
+            TeeResponseStatus::Error { code, message } => Err(Error::Tee(format!(
+                "Store secret failed: {} ({})",
+                message, code
+            ))),
             _ => Ok(()),
         }
     }
@@ -198,9 +199,10 @@ impl TeeClient {
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
                     .map_err(|e| Error::Tee(format!("Failed to decode secret: {}", e)))
             }
-            TeeResponseStatus::Error { code, message } => {
-                Err(Error::Tee(format!("Retrieve secret failed: {} ({})", message, code)))
-            }
+            TeeResponseStatus::Error { code, message } => Err(Error::Tee(format!(
+                "Retrieve secret failed: {} ({})",
+                message, code
+            ))),
             _ => Err(Error::Tee("Unexpected response status".to_string())),
         }
     }
@@ -217,9 +219,10 @@ impl TeeClient {
 
         match response.status {
             TeeResponseStatus::Success => Ok(()),
-            TeeResponseStatus::Error { code, message } => {
-                Err(Error::Tee(format!("Terminate session failed: {} ({})", message, code)))
-            }
+            TeeResponseStatus::Error { code, message } => Err(Error::Tee(format!(
+                "Terminate session failed: {} ({})",
+                message, code
+            ))),
             _ => Ok(()),
         }
     }

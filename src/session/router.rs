@@ -2,7 +2,7 @@
 
 use crate::channels::InboundMessage;
 use crate::error::Result;
-use crate::privacy::{Classifier, ClassificationResult, PolicyDecision, PolicyEngine};
+use crate::privacy::{ClassificationResult, Classifier, PolicyDecision, PolicyEngine};
 use crate::session::SessionManager;
 use crate::tee::TeeManager;
 use std::sync::Arc;
@@ -132,12 +132,14 @@ mod tests {
     fn create_test_router() -> SessionRouter {
         let session_manager = Arc::new(SessionManager::new());
         // Disable TEE for tests to avoid connection requirements
-        let tee_config = TeeConfig { enabled: false, ..Default::default() };
+        let tee_config = TeeConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let tee_manager = Arc::new(TeeManager::new(tee_config));
         let privacy_config = PrivacyConfig::default();
-        let classifier = Arc::new(
-            Classifier::new(privacy_config.rules, privacy_config.default_level).unwrap(),
-        );
+        let classifier =
+            Arc::new(Classifier::new(privacy_config.rules, privacy_config.default_level).unwrap());
         let policy_engine = Arc::new(PolicyEngine::new());
 
         SessionRouter::new(session_manager, tee_manager, classifier, policy_engine)
@@ -146,7 +148,8 @@ mod tests {
     #[tokio::test]
     async fn test_route_normal_message() {
         let router = create_test_router();
-        let message = InboundMessage::new("telegram", "user-123", "chat-456", "Hello, how are you?");
+        let message =
+            InboundMessage::new("telegram", "user-123", "chat-456", "Hello, how are you?");
 
         let decision = router.route(&message).await.unwrap();
 
@@ -169,7 +172,10 @@ mod tests {
         // TEE is disabled in test, so use_tee should be false
         assert!(!decision.use_tee);
         // But classification should still detect highly sensitive data
-        assert_eq!(decision.classification.level, SensitivityLevel::HighlySensitive);
+        assert_eq!(
+            decision.classification.level,
+            SensitivityLevel::HighlySensitive
+        );
     }
 
     #[test]
@@ -180,12 +186,8 @@ mod tests {
         assert!(!router.requires_tee(&normal_msg));
 
         // TEE is disabled in test router, so requires_tee always returns false
-        let sensitive_msg = InboundMessage::new(
-            "telegram",
-            "user-123",
-            "chat-456",
-            "My SSN is 123-45-6789",
-        );
+        let sensitive_msg =
+            InboundMessage::new("telegram", "user-123", "chat-456", "My SSN is 123-45-6789");
         // With TEE disabled, requires_tee returns false even for sensitive data
         assert!(!router.requires_tee(&sensitive_msg));
     }

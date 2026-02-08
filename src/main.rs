@@ -138,7 +138,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_gateway(config: SafeClawConfig, host: String, port: u16, tee_enabled: bool) -> Result<()> {
+async fn run_gateway(
+    config: SafeClawConfig,
+    host: String,
+    port: u16,
+    tee_enabled: bool,
+) -> Result<()> {
     tracing::info!("Starting SafeClaw Gateway");
 
     let gateway = GatewayBuilder::new()
@@ -235,7 +240,12 @@ async fn send_message(channel: &str, to: &str, message: &str, gateway_url: &str)
 // ---------------------------------------------------------------------------
 
 fn prompt_input(question: &str, default: &str) -> String {
-    prompt_input_from(question, default, &mut io::stdin().lock(), &mut io::stdout())
+    prompt_input_from(
+        question,
+        default,
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+    )
 }
 
 fn prompt_input_from(
@@ -320,7 +330,10 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
     // Telegram
     if prompt_yes_no("Enable Telegram?", false) {
         let bot_token_ref = prompt_input("  Telegram bot_token_ref", "telegram_bot_token");
-        let users_str = prompt_input("  Allowed user IDs (comma-separated, or empty for none)", "");
+        let users_str = prompt_input(
+            "  Allowed user IDs (comma-separated, or empty for none)",
+            "",
+        );
         let allowed_users: Vec<i64> = users_str
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
@@ -409,10 +422,7 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
     // Step 4: AI Model Provider
     println!("--- Step 4: AI Model Provider ---");
     let provider = prompt_input("Default provider (anthropic / openai)", "anthropic");
-    let api_key_ref = prompt_input(
-        "API key reference name",
-        &format!("{}_api_key", provider),
-    );
+    let api_key_ref = prompt_input("API key reference name", &format!("{}_api_key", provider));
 
     let mut providers = HashMap::new();
     providers.insert(
@@ -477,12 +487,8 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
     })?;
 
     let config_path = config_dir.join("config.toml");
-    std::fs::write(&config_path, &toml_str).with_context(|| {
-        format!(
-            "Failed to write config file: {}",
-            config_path.display()
-        )
-    })?;
+    std::fs::write(&config_path, &toml_str)
+        .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
     println!("Configuration written to: {}", config_path.display());
 
@@ -534,9 +540,8 @@ fn install_launchd_daemon(config_path: &std::path::Path) -> Result<()> {
     })?;
 
     let plist_path = agents_dir.join("com.a3s.safeclaw.plist");
-    std::fs::write(&plist_path, &plist_content).with_context(|| {
-        format!("Failed to write plist: {}", plist_path.display())
-    })?;
+    std::fs::write(&plist_path, &plist_content)
+        .with_context(|| format!("Failed to write plist: {}", plist_path.display()))?;
 
     println!("LaunchAgent installed: {}", plist_path.display());
     println!("Loading daemon...");
@@ -569,9 +574,8 @@ fn install_systemd_daemon(config_path: &std::path::Path) -> Result<()> {
     })?;
 
     let unit_path = units_dir.join("safeclaw.service");
-    std::fs::write(&unit_path, &unit_content).with_context(|| {
-        format!("Failed to write unit file: {}", unit_path.display())
-    })?;
+    std::fs::write(&unit_path, &unit_content)
+        .with_context(|| format!("Failed to write unit file: {}", unit_path.display()))?;
 
     println!("Systemd user unit installed: {}", unit_path.display());
     println!("Enabling and starting daemon...");
@@ -595,8 +599,7 @@ fn install_systemd_daemon(config_path: &std::path::Path) -> Result<()> {
 
 #[allow(dead_code)]
 fn generate_launchd_plist(config_path: &std::path::Path) -> Result<String> {
-    let safeclaw_bin = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("safeclaw"));
+    let safeclaw_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("safeclaw"));
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -628,8 +631,7 @@ fn generate_launchd_plist(config_path: &std::path::Path) -> Result<String> {
 
 #[allow(dead_code)]
 fn generate_systemd_unit(config_path: &std::path::Path) -> Result<String> {
-    let safeclaw_bin = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("safeclaw"));
+    let safeclaw_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("safeclaw"));
     Ok(format!(
         r#"[Unit]
 Description=SafeClaw - Secure Personal AI Assistant
@@ -675,8 +677,7 @@ async fn run_doctor() -> Result<()> {
     // Check configuration
     println!();
     println!("Checking configuration...");
-    let config_path = dirs::config_dir()
-        .map(|p| p.join("safeclaw").join("config.toml"));
+    let config_path = dirs::config_dir().map(|p| p.join("safeclaw").join("config.toml"));
     if let Some(path) = config_path {
         if path.exists() {
             println!("  Configuration file found: {}", path.display());
@@ -713,7 +714,11 @@ mod dirs {
             std::env::var("XDG_CONFIG_HOME")
                 .ok()
                 .map(PathBuf::from)
-                .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".config")))
+                .or_else(|| {
+                    std::env::var("HOME")
+                        .ok()
+                        .map(|h| PathBuf::from(h).join(".config"))
+                })
         }
         #[cfg(target_os = "windows")]
         {
@@ -835,7 +840,8 @@ mod tests {
 
     #[test]
     fn test_daemon_plist_generation() {
-        let config_path = PathBuf::from("/Users/test/Library/Application Support/safeclaw/config.toml");
+        let config_path =
+            PathBuf::from("/Users/test/Library/Application Support/safeclaw/config.toml");
         let plist = generate_launchd_plist(&config_path).unwrap();
 
         assert!(plist.contains("<key>Label</key>"));

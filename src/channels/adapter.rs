@@ -17,10 +17,7 @@ pub enum ChannelEvent {
         new_content: String,
     },
     /// Message deleted
-    MessageDeleted {
-        channel: String,
-        message_id: String,
-    },
+    MessageDeleted { channel: String, message_id: String },
     /// User started typing
     Typing {
         channel: String,

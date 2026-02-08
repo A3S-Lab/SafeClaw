@@ -38,8 +38,7 @@ impl DingTalkAdapter {
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let signature = hmac::sign(&key, string_to_sign.as_bytes());
         use base64::Engine as _;
-        let encoded =
-            base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
         encoded == expected
     }
 }
@@ -200,8 +199,7 @@ mod tests {
         let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
         let signature = hmac::sign(&key, string_to_sign.as_bytes());
         use base64::Engine as _;
-        let expected =
-            base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        let expected = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
 
         assert!(DingTalkAdapter::verify_signature(
             timestamp, secret, &expected

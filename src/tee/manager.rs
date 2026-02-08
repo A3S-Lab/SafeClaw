@@ -191,7 +191,11 @@ impl TeeManager {
     }
 
     /// Get session for a user on a channel
-    pub async fn get_user_session(&self, user_id: &str, channel_id: &str) -> Option<Arc<TeeSession>> {
+    pub async fn get_user_session(
+        &self,
+        user_id: &str,
+        channel_id: &str,
+    ) -> Option<Arc<TeeSession>> {
         let user_key = format!("{}:{}", user_id, channel_id);
         let session_id = self.user_sessions.read().await.get(&user_key)?.clone();
         self.get_session(&session_id).await

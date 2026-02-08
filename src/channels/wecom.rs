@@ -123,10 +123,7 @@ impl ChannelAdapter for WeComAdapter {
         }
 
         // WeCom does not natively support typing indicators
-        tracing::debug!(
-            "Typing indicator not supported for WeCom chat {}",
-            chat_id
-        );
+        tracing::debug!("Typing indicator not supported for WeCom chat {}", chat_id);
 
         Ok(())
     }
