@@ -1422,6 +1422,39 @@ Production readiness and deployment:
   - [ ] Deployment guide
   - [ ] API documentation
 
+### Phase 9: Runtime Security Audit Pipeline 📋
+
+Continuous runtime verification and audit:
+
+- [ ] **Audit Event Pipeline**: SafeClaw → structured audit events → NATS Stream
+  - Event types: tool_blocked, pii_detected, taint_triggered, injection_attempt
+  - Event schema: timestamp, session_id, severity, event_type, details
+  - NATS JetStream for durable delivery
+- [ ] **Real-time Alerting**: Anomaly detection on audit event stream
+  - Abnormal tool call frequency (> N calls/min per session)
+  - Sensitive data access spikes
+  - Repeated injection attempts from same session
+  - Configurable alert rules (webhook, Slack, PagerDuty)
+- [ ] **Audit Persistence**: Long-term storage for compliance
+  - PostgreSQL / ClickHouse backend for audit events
+  - Retention policies (30d / 90d / 1y configurable)
+  - Query API for security investigations
+- [ ] **Security Policy Drift Detection**: A3sfile vs runtime state
+  - Periodic reconciliation: declared SecurityContext vs K8s actual state
+  - Detect manual modifications to security policies
+  - Auto-remediation or alert on drift
+  - Drift report in OS Platform Security Dashboard
+- [ ] **Panic Path Elimination**: Systematic audit of unsafe code paths
+  - Classify all `unimplemented!()` / `todo!()` / `panic!()` markers
+  - Replace with `Err(Unimplemented)` for non-critical paths
+  - Add to roadmap for critical paths
+  - CI gate: zero `panic!()` in production code paths
+- [ ] **PII Detection Enhancement**: ML-augmented pattern recognition
+  - Local ML model for context-aware PII detection
+  - "My password is X" semantic pattern recognition
+  - Reduce false positives from regex-only approach
+  - Support for enterprise compliance rules (HIPAA, PCI-DSS, GDPR)
+
 ## A3S Ecosystem
 
 SafeClaw is part of the A3S ecosystem:
