@@ -1482,6 +1482,8 @@ cargo build
 
 ### Test
 
+**184 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, and TEE integration.
+
 ```bash
 cargo test
 ```
