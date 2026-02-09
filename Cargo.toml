@@ -22,7 +22,7 @@ path = "src/main.rs"
 a3s-tools-core = { version = "0.1", path = "../tools-core" }
 a3s-lane = { version = "0.1", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
-a3s-code = { version = "0.1", path = "../code" }
+a3s-code = { version = "0.2", path = "../code" }
 a3s_context = { version = "0.1", path = "../context" }
 
 # Regex for privacy classification
