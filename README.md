@@ -246,6 +246,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Output Sanitization**: Prevent AI from leaking sensitive data in responses
 - **Session Isolation**: Strict memory isolation between users
 - **Distributed TEE**: Split sensitive tasks across multiple isolated environments
+- **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (planned)
 
 ## Quick Start
 
@@ -1280,6 +1281,10 @@ safeclaw/
 - [x] Session management
 - [x] Cryptographic utilities (X25519, AES-GCM)
 - [x] TEE client and protocol
+- [x] Memory system — three-layer data hierarchy:
+  - [x] Layer 1 (Resource): Raw classified content with privacy routing, ResourceStore, PrivacyGate
+  - [x] Layer 2 (Artifact): Structured knowledge extraction from Resources, ArtifactStore, Extractor
+  - [ ] Layer 3 (Insight): Cross-conversation knowledge synthesis (planned)
 
 ### Phase 2: Channels 🚧
 
