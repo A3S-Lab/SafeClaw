@@ -45,6 +45,10 @@ pub enum Error {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// Memory error
+    #[error("Memory error: {0}")]
+    Memory(String),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
