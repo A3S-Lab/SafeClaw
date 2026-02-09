@@ -88,6 +88,9 @@ enum Commands {
         #[arg(long)]
         default: bool,
     },
+
+    /// Update safeclaw to the latest version
+    Update,
 }
 
 #[tokio::main]
@@ -113,6 +116,16 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
+        Commands::Update => {
+            return a3s_updater::run_update(&a3s_updater::UpdateConfig {
+                binary_name: "safeclaw",
+                crate_name: "safeclaw",
+                current_version: env!("CARGO_PKG_VERSION"),
+                github_owner: "A3S-Lab",
+                github_repo: "SafeClaw",
+            })
+            .await;
+        }
         Commands::Gateway { host, port, no_tee } => {
             run_gateway(config, host, port, !no_tee).await?;
         }

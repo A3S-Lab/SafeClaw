@@ -50,6 +50,9 @@ toml = "0.8"
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Self-update
+a3s-updater = { version = "0.1", path = "../updater" }
+
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }
 
