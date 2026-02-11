@@ -118,7 +118,10 @@ mod tests {
         // Should have 1 Entity (email) + 1 Topic (text)
         assert_eq!(artifacts.len(), 2);
 
-        let entity = artifacts.iter().find(|a| a.artifact_type == ArtifactType::Entity).unwrap();
+        let entity = artifacts
+            .iter()
+            .find(|a| a.artifact_type == ArtifactType::Entity)
+            .unwrap();
         assert_eq!(entity.tags, vec!["email"]);
         assert_eq!(entity.source_resource_ids, vec![resource.id]);
         assert_eq!(entity.sensitivity, SensitivityLevel::Sensitive);
@@ -126,11 +129,13 @@ mod tests {
 
     #[test]
     fn test_extract_entities_from_credit_card() {
-        let resource =
-            classified_resource("Card: 4111-1111-1111-1111", ContentType::Text);
+        let resource = classified_resource("Card: 4111-1111-1111-1111", ContentType::Text);
         let artifacts = Extractor::extract(&resource);
 
-        let entity = artifacts.iter().find(|a| a.artifact_type == ArtifactType::Entity).unwrap();
+        let entity = artifacts
+            .iter()
+            .find(|a| a.artifact_type == ArtifactType::Entity)
+            .unwrap();
         assert_eq!(entity.tags, vec!["credit_card"]);
         assert_eq!(entity.sensitivity, SensitivityLevel::HighlySensitive);
         assert!((entity.importance - 0.9).abs() < f32::EPSILON);
@@ -188,7 +193,10 @@ mod tests {
         let resource = classified_resource("fn main() {}", ContentType::Code);
         let artifacts = Extractor::extract(&resource);
 
-        let topic = artifacts.iter().find(|a| a.artifact_type == ArtifactType::Topic).unwrap();
+        let topic = artifacts
+            .iter()
+            .find(|a| a.artifact_type == ArtifactType::Topic)
+            .unwrap();
         assert_eq!(topic.tags, vec!["code"]);
         assert!(topic.content.contains("code"));
     }

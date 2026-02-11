@@ -127,7 +127,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(resource.sensitivity, SensitivityLevel::Sensitive);
-        assert!(matches!(resource.storage_location, StorageLocation::Tee { .. }));
+        assert!(matches!(
+            resource.storage_location,
+            StorageLocation::Tee { .. }
+        ));
     }
 
     #[test]
@@ -138,7 +141,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(resource.sensitivity, SensitivityLevel::HighlySensitive);
-        assert!(matches!(resource.storage_location, StorageLocation::Tee { .. }));
+        assert!(matches!(
+            resource.storage_location,
+            StorageLocation::Tee { .. }
+        ));
     }
 
     #[test]
@@ -170,7 +176,10 @@ mod tests {
         // Even normal text should route to TEE with strict policy
         let resource = gate.process(make_input("Hello world")).unwrap();
         assert_eq!(resource.sensitivity, SensitivityLevel::Normal);
-        assert!(matches!(resource.storage_location, StorageLocation::Tee { .. }));
+        assert!(matches!(
+            resource.storage_location,
+            StorageLocation::Tee { .. }
+        ));
     }
 
     #[test]

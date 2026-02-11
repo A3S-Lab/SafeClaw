@@ -239,7 +239,13 @@ mod tests {
     use crate::memory::artifact::ArtifactBuilder;
 
     /// Helper: build an Entity artifact with given content, tags, and resource IDs
-    fn entity(content: &str, sensitivity: SensitivityLevel, importance: f32, tags: &[&str], resource_ids: &[Uuid]) -> Artifact {
+    fn entity(
+        content: &str,
+        sensitivity: SensitivityLevel,
+        importance: f32,
+        tags: &[&str],
+        resource_ids: &[Uuid],
+    ) -> Artifact {
         let mut builder = ArtifactBuilder::new(ArtifactType::Entity)
             .content(content)
             .sensitivity(sensitivity)
@@ -266,8 +272,20 @@ mod tests {
 
     #[test]
     fn test_entity_frequency_pattern() {
-        let a1 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &["email"], &[]);
-        let a2 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &["email"], &[]);
+        let a1 = entity(
+            "test@example.com",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &["email"],
+            &[],
+        );
+        let a2 = entity(
+            "test@example.com",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &["email"],
+            &[],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -284,7 +302,13 @@ mod tests {
 
     #[test]
     fn test_entity_frequency_below_threshold() {
-        let a1 = entity("single@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
+        let a1 = entity(
+            "single@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
 
         let insights = Synthesizer::synthesize(&[a1]);
 
@@ -299,7 +323,15 @@ mod tests {
     fn test_entity_frequency_confidence_cap() {
         // 6 occurrences → confidence = min(6/5, 1.0) = 1.0
         let artifacts: Vec<Artifact> = (0..6)
-            .map(|_| entity("repeated@example.com", SensitivityLevel::Normal, 0.5, &[], &[]))
+            .map(|_| {
+                entity(
+                    "repeated@example.com",
+                    SensitivityLevel::Normal,
+                    0.5,
+                    &[],
+                    &[],
+                )
+            })
             .collect();
 
         let insights = Synthesizer::synthesize(&artifacts);
@@ -313,10 +345,34 @@ mod tests {
 
     #[test]
     fn test_entity_frequency_distinct_entities() {
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
-        let a2 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
-        let b1 = entity("bob@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
-        let b2 = entity("bob@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
+        let a2 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
+        let b1 = entity(
+            "bob@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
+        let b2 = entity(
+            "bob@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2, b1, b2]);
 
@@ -361,8 +417,20 @@ mod tests {
     #[test]
     fn test_co_occurrence() {
         let resource_id = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[resource_id]);
-        let a2 = entity("555-1234", SensitivityLevel::Sensitive, 0.7, &["phone"], &[resource_id]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[resource_id],
+        );
+        let a2 = entity(
+            "555-1234",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &["phone"],
+            &[resource_id],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -380,7 +448,13 @@ mod tests {
     fn test_co_occurrence_no_shared_resource() {
         let r1 = Uuid::new_v4();
         let r2 = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &[], &[r1]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[r1],
+        );
         let a2 = entity("555-1234", SensitivityLevel::Normal, 0.5, &[], &[r2]);
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
@@ -395,9 +469,27 @@ mod tests {
     #[test]
     fn test_co_occurrence_no_duplicate_pairs() {
         let resource_id = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &[], &[resource_id]);
-        let a2 = entity("bob@example.com", SensitivityLevel::Normal, 0.5, &[], &[resource_id]);
-        let a3 = entity("555-1234", SensitivityLevel::Normal, 0.5, &[], &[resource_id]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
+        let a2 = entity(
+            "bob@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
+        let a3 = entity(
+            "555-1234",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2, a3]);
 
@@ -412,7 +504,13 @@ mod tests {
     #[test]
     fn test_sensitivity_max_propagation() {
         let a1 = entity("test@example.com", SensitivityLevel::Normal, 0.5, &[], &[]);
-        let a2 = entity("test@example.com", SensitivityLevel::HighlySensitive, 0.5, &[], &[]);
+        let a2 = entity(
+            "test@example.com",
+            SensitivityLevel::HighlySensitive,
+            0.5,
+            &[],
+            &[],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -464,23 +562,59 @@ mod tests {
         let resource_id = Uuid::new_v4();
 
         // 2× same entity → triggers entity_frequency (Pattern)
-        let e1 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &["email"], &[resource_id]);
-        let e2 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &["email"], &[resource_id]);
+        let e1 = entity(
+            "test@example.com",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &["email"],
+            &[resource_id],
+        );
+        let e2 = entity(
+            "test@example.com",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &["email"],
+            &[resource_id],
+        );
         // 2nd entity in same resource → triggers co_occurrence (Correlation)
-        let e3 = entity("555-1234", SensitivityLevel::Normal, 0.5, &["phone"], &[resource_id]);
+        let e3 = entity(
+            "555-1234",
+            SensitivityLevel::Normal,
+            0.5,
+            &["phone"],
+            &[resource_id],
+        );
         // 2× same topic tag → triggers topic_aggregation (Summary)
         let t1 = topic("code", SensitivityLevel::Normal, 0.4);
         let t2 = topic("code", SensitivityLevel::Normal, 0.4);
 
         let insights = Synthesizer::synthesize(&[e1, e2, e3, t1, t2]);
 
-        let patterns: Vec<_> = insights.iter().filter(|i| i.insight_type == InsightType::Pattern).collect();
-        let summaries: Vec<_> = insights.iter().filter(|i| i.insight_type == InsightType::Summary).collect();
-        let correlations: Vec<_> = insights.iter().filter(|i| i.insight_type == InsightType::Correlation).collect();
+        let patterns: Vec<_> = insights
+            .iter()
+            .filter(|i| i.insight_type == InsightType::Pattern)
+            .collect();
+        let summaries: Vec<_> = insights
+            .iter()
+            .filter(|i| i.insight_type == InsightType::Summary)
+            .collect();
+        let correlations: Vec<_> = insights
+            .iter()
+            .filter(|i| i.insight_type == InsightType::Correlation)
+            .collect();
 
-        assert!(!patterns.is_empty(), "should have Pattern from entity_frequency");
-        assert!(!summaries.is_empty(), "should have Summary from topic_aggregation");
-        assert!(!correlations.is_empty(), "should have Correlation from co_occurrence");
+        assert!(
+            !patterns.is_empty(),
+            "should have Pattern from entity_frequency"
+        );
+        assert!(
+            !summaries.is_empty(),
+            "should have Summary from topic_aggregation"
+        );
+        assert!(
+            !correlations.is_empty(),
+            "should have Correlation from co_occurrence"
+        );
     }
 
     #[test]
@@ -488,8 +622,20 @@ mod tests {
         // Same pair of entities in two different resources should still produce only 1 correlation
         let r1 = Uuid::new_v4();
         let r2 = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &[], &[r1, r2]);
-        let a2 = entity("bob@example.com", SensitivityLevel::Normal, 0.5, &[], &[r1, r2]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[r1, r2],
+        );
+        let a2 = entity(
+            "bob@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[r1, r2],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -497,14 +643,30 @@ mod tests {
             .iter()
             .filter(|i| i.insight_type == InsightType::Correlation)
             .collect();
-        assert_eq!(correlations.len(), 1, "same pair across 2 resources should produce 1 correlation");
+        assert_eq!(
+            correlations.len(),
+            1,
+            "same pair across 2 resources should produce 1 correlation"
+        );
     }
 
     #[test]
     fn test_entity_frequency_tag_merging() {
         // Two entity artifacts with different tags → merged tags in the Pattern insight
-        let a1 = entity("test@example.com", SensitivityLevel::Normal, 0.5, &["email"], &[]);
-        let a2 = entity("test@example.com", SensitivityLevel::Normal, 0.5, &["contact"], &[]);
+        let a1 = entity(
+            "test@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["email"],
+            &[],
+        );
+        let a2 = entity(
+            "test@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &["contact"],
+            &[],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -553,8 +715,20 @@ mod tests {
     #[test]
     fn test_co_occurrence_sensitivity_propagation() {
         let resource_id = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Public, 0.3, &[], &[resource_id]);
-        let a2 = entity("555-1234", SensitivityLevel::HighlySensitive, 0.9, &[], &[resource_id]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Public,
+            0.3,
+            &[],
+            &[resource_id],
+        );
+        let a2 = entity(
+            "555-1234",
+            SensitivityLevel::HighlySensitive,
+            0.9,
+            &[],
+            &[resource_id],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -568,8 +742,20 @@ mod tests {
     #[test]
     fn test_co_occurrence_importance_averaging() {
         let resource_id = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.2, &[], &[resource_id]);
-        let a2 = entity("555-1234", SensitivityLevel::Normal, 0.8, &[], &[resource_id]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.2,
+            &[],
+            &[resource_id],
+        );
+        let a2 = entity(
+            "555-1234",
+            SensitivityLevel::Normal,
+            0.8,
+            &[],
+            &[resource_id],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 
@@ -630,7 +816,10 @@ mod tests {
             .unwrap();
 
         let insights = Synthesizer::synthesize(&[p1, p2]);
-        assert!(insights.is_empty(), "Procedure artifacts should not trigger any synthesis rule");
+        assert!(
+            insights.is_empty(),
+            "Procedure artifacts should not trigger any synthesis rule"
+        );
     }
 
     #[test]
@@ -682,8 +871,20 @@ mod tests {
     #[test]
     fn test_co_occurrence_content_includes_both_entities() {
         let resource_id = Uuid::new_v4();
-        let a1 = entity("alice@example.com", SensitivityLevel::Normal, 0.5, &[], &[resource_id]);
-        let a2 = entity("555-1234", SensitivityLevel::Normal, 0.5, &[], &[resource_id]);
+        let a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
+        let a2 = entity(
+            "555-1234",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
 
         let insights = Synthesizer::synthesize(&[a1, a2]);
 

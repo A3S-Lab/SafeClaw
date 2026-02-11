@@ -202,7 +202,10 @@ mod tests {
             .importance(0.7)
             .evidence_count(5)
             .tag("entity_frequency")
-            .metadata("source", serde_json::Value::String("synthesizer".to_string()))
+            .metadata(
+                "source",
+                serde_json::Value::String("synthesizer".to_string()),
+            )
             .build()
             .unwrap();
 
@@ -323,7 +326,10 @@ mod tests {
 
         let score = insight.relevance_score();
         assert!(score > 0.7, "score {score} should be > 0.7 from importance");
-        assert!(score < 0.8, "score {score} should be < 0.8 (decay is small)");
+        assert!(
+            score < 0.8,
+            "score {score} should be < 0.8 (decay is small)"
+        );
     }
 
     #[test]
@@ -345,7 +351,10 @@ mod tests {
         };
 
         let score = insight.relevance_score();
-        assert!(score > 0.6, "score {score} should be > 0.6 for fresh insight");
+        assert!(
+            score > 0.6,
+            "score {score} should be > 0.6 for fresh insight"
+        );
         assert!(score <= 1.0, "score {score} should be <= 1.0");
     }
 
@@ -451,7 +460,10 @@ mod tests {
         assert!((deserialized.importance - 0.6).abs() < f32::EPSILON);
         assert_eq!(deserialized.evidence_count, 3);
         assert_eq!(deserialized.tags, vec!["test_tag"]);
-        assert_eq!(deserialized.source_artifact_ids, insight.source_artifact_ids);
+        assert_eq!(
+            deserialized.source_artifact_ids,
+            insight.source_artifact_ids
+        );
     }
 
     #[test]
@@ -487,7 +499,10 @@ mod tests {
         };
 
         let score = insight.relevance_score();
-        assert!(score < 0.01, "score {score} should be near zero for old, unimportant insight");
+        assert!(
+            score < 0.01,
+            "score {score} should be near zero for old, unimportant insight"
+        );
         assert!(score >= 0.0, "score {score} should be non-negative");
     }
 }

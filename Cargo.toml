@@ -24,6 +24,7 @@ a3s-lane = { version = "0.1", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
 a3s-code = { version = "0.3", path = "../code" }
 a3s_context = { version = "0.1", path = "../context" }
+a3s-gateway = { version = "0.1", path = "../gateway" }
 
 # Regex for privacy classification
 regex = "1.10"

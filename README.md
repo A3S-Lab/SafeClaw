@@ -290,9 +290,9 @@ safeclaw config --default
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        SafeClaw Gateway                              │
+│                  A3S Gateway (a3s-gateway)                            │
 │  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    Channel Manager                           │   │
+│  │                 Channel Adapters (via Gateway)                  │   │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
 │  │  │ Telegram │ │  Feishu  │ │ DingTalk │ │    WeCom     │   │   │
 │  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
@@ -1255,10 +1255,10 @@ safeclaw/
 │   ├── crypto/             # Cryptographic utilities
 │   │   ├── keys.rs         # Key management
 │   │   └── secure_channel.rs # Encrypted channels
-│   ├── gateway/            # Gateway server
-│   │   ├── server.rs       # Main gateway
-│   │   ├── handler.rs      # HTTP API
-│   │   └── websocket.rs    # WebSocket handler
+│   ├── gateway/            # Gateway integration (delegates to a3s-gateway)
+│   │   ├── server.rs       # Backend service registration
+│   │   ├── handler.rs      # Request handler (receives from a3s-gateway)
+│   │   └── websocket.rs    # WebSocket handler (proxied by a3s-gateway)
 │   ├── privacy/            # Privacy classification
 │   │   ├── classifier.rs   # Sensitive data detection
 │   │   └── policy.rs       # Policy engine
@@ -1286,24 +1286,33 @@ safeclaw/
   - [x] Layer 2 (Artifact): Structured knowledge extraction from Resources, ArtifactStore, Extractor
   - [x] Layer 3 (Insight): Cross-conversation knowledge synthesis, InsightStore, Synthesizer (Pattern/Summary/Correlation rules)
 
-### Phase 2: Channels 🚧
+### Phase 2: Channels (via A3S Gateway) 🚧
+
+Channel adapters are now provided by **a3s-gateway** (Phase 3: AI Agent Gateway). SafeClaw registers as a backend service and receives multi-channel messages through Gateway's webhook ingestion layer.
 
 - [x] Channel adapter trait
 - [x] Telegram adapter (skeleton)
 - [x] WebChat adapter
-- [ ] **Feishu adapter (飞书)**: Event subscription, message send/receive
-- [ ] **DingTalk adapter (钉钉)**: Robot callback, outgoing messages
-- [ ] **WeCom adapter (企业微信)**: Application message, callback verification
-- [ ] Slack adapter
-- [ ] Discord adapter
+- [ ] **Feishu adapter (飞书)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
+- [ ] **DingTalk adapter (钉钉)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
+- [ ] **WeCom adapter (企业微信)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
+- [ ] Slack adapter (via a3s-gateway)
+- [ ] Discord adapter (via a3s-gateway)
 
-### Phase 3: Gateway 🚧
+### Phase 3: Gateway Integration (depends on a3s-gateway) 🚧
 
-- [x] Gateway server structure
-- [x] HTTP API endpoints
-- [x] WebSocket handler
-- [ ] Full Telegram Bot API integration
-- [ ] Authentication and authorization
+SafeClaw's networking layer is now delegated to **a3s-gateway**. Instead of building a custom gateway, SafeClaw runs as a backend service behind A3S Gateway, which provides reverse proxy, routing, middleware, and multi-channel ingestion.
+
+- [x] ~~Gateway server structure~~ → Replaced by a3s-gateway
+- [x] ~~HTTP API endpoints~~ → Exposed as backend service behind a3s-gateway
+- [x] ~~WebSocket handler~~ → WebSocket proxying handled by a3s-gateway
+- [ ] **Register SafeClaw as a3s-gateway backend service**
+- [ ] **Define Gateway routing rules** for SafeClaw endpoints (privacy-aware routing)
+- [ ] **Authentication & authorization** via a3s-gateway middleware pipeline (API key, JWT, OAuth2)
+- [ ] **Rate limiting** via a3s-gateway middleware
+- [ ] **Token metering** via a3s-gateway for per-user/agent LLM usage tracking
+- [ ] **Conversation affinity** via a3s-gateway sticky sessions for multi-turn conversations
+- [ ] **TEE routing rules** in a3s-gateway for privacy-sensitive requests → SafeClaw TEE backend
 
 ### Phase 4: TEE Security 📋
 
@@ -1361,7 +1370,7 @@ Prevent A3S Code from leaking sensitive data inside TEE:
 
 ### Phase 6: Distributed TEE Architecture 📋
 
-Split-Process-Merge architecture with local LLM coordination:
+Split-Process-Merge architecture with local LLM coordination. A3S Gateway handles inter-service routing and load balancing across TEE workers.
 
 - [ ] **Local LLM Integration**:
   - [ ] A3S Box support for local LLM (Qwen3, DeepSeek-R1, ChatGLM, Yi)
@@ -1373,12 +1382,12 @@ Split-Process-Merge architecture with local LLM coordination:
   - [ ] Sensitive data identification and splitting
   - [ ] Sub-task assignment to appropriate workers
   - [ ] Result aggregation and final sanitization
-- [ ] **Worker Pool Management**:
+- [ ] **Worker Pool Management** (load balanced via a3s-gateway):
   - [ ] Secure Worker pool (TEE environment)
   - [ ] General Worker pool (REE environment)
   - [ ] Dynamic worker allocation based on task sensitivity
-  - [ ] Worker health monitoring and failover
-- [ ] **Inter-TEE Communication**:
+  - [ ] Worker health monitoring and failover (a3s-gateway health checks)
+- [ ] **Inter-TEE Communication** (routed via a3s-gateway):
   - [ ] Secure channels between Coordinator and Workers
   - [ ] Data minimization enforcement (need-to-know basis)
   - [ ] Cross-TEE attestation verification
@@ -1418,10 +1427,10 @@ Production readiness and deployment:
 - [ ] **Performance Optimization**:
   - [ ] TEE communication latency optimization
   - [ ] Batch processing for high throughput
-- [ ] **Deployment**:
+- [ ] **Deployment** (via a3s-gateway):
   - [ ] Docker images with TEE support
-  - [ ] Kubernetes deployment with confidential computing
-  - [ ] Helm charts
+  - [ ] Kubernetes deployment with confidential computing (a3s-gateway as ingress)
+  - [ ] Helm charts (includes a3s-gateway + SafeClaw)
 - [ ] **Documentation**:
   - [ ] Security whitepaper
   - [ ] Deployment guide

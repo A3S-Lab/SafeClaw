@@ -112,11 +112,7 @@ mod tests {
     use crate::config::SensitivityLevel;
     use crate::memory::artifact::ArtifactBuilder;
 
-    fn build_test_artifact(
-        artifact_type: ArtifactType,
-        content: &str,
-        tags: &[&str],
-    ) -> Artifact {
+    fn build_test_artifact(artifact_type: ArtifactType, content: &str, tags: &[&str]) -> Artifact {
         let mut builder = ArtifactBuilder::new(artifact_type)
             .content(content)
             .sensitivity(SensitivityLevel::Normal)

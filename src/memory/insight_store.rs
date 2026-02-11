@@ -123,11 +123,7 @@ mod tests {
     use crate::config::SensitivityLevel;
     use crate::memory::insight::InsightBuilder;
 
-    fn build_test_insight(
-        insight_type: InsightType,
-        content: &str,
-        tags: &[&str],
-    ) -> Insight {
+    fn build_test_insight(insight_type: InsightType, content: &str, tags: &[&str]) -> Insight {
         let mut builder = InsightBuilder::new(insight_type)
             .content(content)
             .sensitivity(SensitivityLevel::Normal)
@@ -447,10 +443,18 @@ mod tests {
     #[tokio::test]
     async fn test_find_by_type_all_variants() {
         let store = InsightStore::new();
-        store.put(build_test_insight(InsightType::Pattern, "p", &[])).await;
-        store.put(build_test_insight(InsightType::Summary, "s", &[])).await;
-        store.put(build_test_insight(InsightType::Correlation, "c", &[])).await;
-        store.put(build_test_insight(InsightType::Trend, "t", &[])).await;
+        store
+            .put(build_test_insight(InsightType::Pattern, "p", &[]))
+            .await;
+        store
+            .put(build_test_insight(InsightType::Summary, "s", &[]))
+            .await;
+        store
+            .put(build_test_insight(InsightType::Correlation, "c", &[]))
+            .await;
+        store
+            .put(build_test_insight(InsightType::Trend, "t", &[]))
+            .await;
 
         assert_eq!(store.find_by_type(InsightType::Pattern).await.len(), 1);
         assert_eq!(store.find_by_type(InsightType::Summary).await.len(), 1);

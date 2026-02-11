@@ -174,7 +174,10 @@ mod tests {
             .sensitivity(SensitivityLevel::Sensitive)
             .importance(0.7)
             .tag("email")
-            .metadata("source", serde_json::Value::String("classifier".to_string()))
+            .metadata(
+                "source",
+                serde_json::Value::String("classifier".to_string()),
+            )
             .build()
             .unwrap();
 
@@ -255,7 +258,10 @@ mod tests {
         // importance contributes 1.0 * 0.7 = 0.7
         // decay after 90 days ≈ exp(-3) ≈ 0.05, contributes ~0.015
         assert!(score > 0.7, "score {score} should be > 0.7 from importance");
-        assert!(score < 0.8, "score {score} should be < 0.8 (decay is small)");
+        assert!(
+            score < 0.8,
+            "score {score} should be < 0.8 (decay is small)"
+        );
     }
 
     #[test]
@@ -278,7 +284,10 @@ mod tests {
         // importance contributes 0.5 * 0.7 = 0.35
         // decay ≈ 1.0 (just created), contributes ~0.3
         // total ≈ 0.65
-        assert!(score > 0.6, "score {score} should be > 0.6 for fresh artifact");
+        assert!(
+            score > 0.6,
+            "score {score} should be > 0.6 for fresh artifact"
+        );
         assert!(score <= 1.0, "score {score} should be <= 1.0");
     }
 }
