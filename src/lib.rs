@@ -6,23 +6,30 @@
 //!
 //! ## Architecture
 //!
+//! SafeClaw runs as a backend service behind **a3s-gateway**, which handles
+//! TLS termination, routing, rate limiting, authentication, and multi-channel
+//! webhook ingestion.
+//!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────────┐
-//! │                        SafeClaw Gateway                              │
+//! │                        A3S Gateway                                   │
 //! │  ┌─────────────────────────────────────────────────────────────┐   │
-//! │  │                    Channel Manager                           │   │
-//! │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
-//! │  │  │ Telegram │ │  Slack   │ │ Discord  │ │   WebChat    │   │   │
-//! │  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
-//! │  └───────┼────────────┼────────────┼──────────────┼───────────┘   │
-//! │          └────────────┴────────────┴──────────────┘               │
-//! │                              │                                     │
-//! │  ┌───────────────────────────▼───────────────────────────────┐   │
-//! │  │                   Session Router                           │   │
-//! │  │  - Route messages to appropriate TEE sessions              │   │
-//! │  │  - Handle multi-agent routing                              │   │
-//! │  │  - Manage session lifecycle                                │   │
-//! │  └───────────────────────────┬───────────────────────────────┘   │
+//! │  │  Reverse Proxy + Routing + Middleware                        │   │
+//! │  │  - TLS termination, JWT auth, rate limiting                 │   │
+//! │  │  - Channel webhooks (Telegram, Slack, Discord, Feishu, ...) │   │
+//! │  │  - Conversation affinity (sticky sessions)                  │   │
+//! │  │  - Token metering                                           │   │
+//! │  └───────────────────────────┬─────────────────────────────────┘   │
+//! └──────────────────────────────┼────────────────────────────────────┘
+//!                                │ HTTP / WebSocket
+//! ┌──────────────────────────────▼────────────────────────────────────┐
+//! │                        SafeClaw Backend                            │
+//! │  ┌─────────────────────────────────────────────────────────────┐  │
+//! │  │                   Session Router                             │  │
+//! │  │  - Route messages to appropriate TEE sessions               │  │
+//! │  │  - Handle multi-agent routing                               │  │
+//! │  │  - Manage session lifecycle                                 │  │
+//! │  └───────────────────────────┬─────────────────────────────────┘  │
 //! │                              │                                     │
 //! │  ┌───────────────────────────▼───────────────────────────────┐   │
 //! │  │                   Privacy Classifier                       │   │
@@ -49,8 +56,15 @@
 //!
 //! ## Key Features
 //!
+//! ### A3S Gateway Integration
+//! - Runs as backend service behind a3s-gateway
+//! - Auto-generates gateway routing configuration
+//! - Privacy-aware routing via gateway rules
+//! - Conversation affinity via sticky sessions
+//! - Token metering per user/agent/session
+//!
 //! ### Multi-Channel Support
-//! - Telegram, Slack, Discord, WebChat
+//! - Telegram, Slack, Discord, WebChat, Feishu, DingTalk, WeCom
 //! - Extensible channel architecture
 //! - Unified message routing
 //!
@@ -67,14 +81,16 @@
 //!
 //! ## Modules
 //!
-//! - [`gateway`]: WebSocket control plane and HTTP API
+//! - [`gateway`]: Gateway server, a3s-gateway integration, and HTTP API
 //! - [`channels`]: Multi-channel message adapters
 //! - [`session`]: Session management and routing
 //! - [`privacy`]: Privacy classification and data protection
 //! - [`tee`]: TEE environment integration with A3S Box
 //! - [`crypto`]: Cryptographic utilities for secure communication
+//! - [`memory`]: Three-layer memory system (Resource → Artifact → Insight)
 //! - [`config`]: Configuration management
 
+pub mod agent;
 pub mod channels;
 pub mod config;
 pub mod crypto;
@@ -85,5 +101,7 @@ pub mod privacy;
 pub mod session;
 pub mod tee;
 
-pub use config::SafeClawConfig;
+pub use agent::{agent_router, AgentBridge, AgentLauncher, AgentSessionStore, AgentState};
+pub use config::{A3sGatewayConfig, SafeClawConfig};
 pub use error::{Error, Result};
+pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};

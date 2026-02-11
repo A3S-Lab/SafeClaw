@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use safeclaw::{
+    agent::{agent_router, AgentBridge, AgentLauncher, AgentSessionStore, AgentState},
     config::{
         ChannelsConfig, DingTalkConfig, DiscordConfig, FeishuConfig, GatewayConfig,
         ModelProviderConfig, ModelsConfig, SafeClawConfig, SlackConfig, TeeBackend, TeeConfig,
@@ -16,6 +17,7 @@ use safeclaw::{
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -51,6 +53,28 @@ enum Commands {
         /// Disable TEE mode
         #[arg(long)]
         no_tee: bool,
+    },
+
+    /// Start SafeClaw as a backend service (behind a3s-gateway)
+    Serve {
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "18790")]
+        port: u16,
+
+        /// Disable TEE mode
+        #[arg(long)]
+        no_tee: bool,
+    },
+
+    /// Generate a3s-gateway routing configuration for SafeClaw
+    GatewayConfig {
+        /// Output file path (stdout if not specified)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
     },
 
     /// Run the onboarding wizard
@@ -129,6 +153,12 @@ async fn main() -> Result<()> {
         Commands::Gateway { host, port, no_tee } => {
             run_gateway(config, host, port, !no_tee).await?;
         }
+        Commands::Serve { host, port, no_tee } => {
+            run_serve(config, host, port, !no_tee).await?;
+        }
+        Commands::GatewayConfig { output } => {
+            generate_gateway_config(&config, output.as_deref())?;
+        }
         Commands::Onboard { install_daemon } => {
             run_onboard(install_daemon).await?;
         }
@@ -151,6 +181,22 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build the shared agent state used by the agent HTTP/WS router.
+fn build_agent_state(port: u16, models: ModelsConfig) -> AgentState {
+    let store = std::sync::Arc::new(AgentSessionStore::new(AgentSessionStore::default_dir()));
+    let (relaunch_tx, _relaunch_rx) = tokio::sync::mpsc::channel(64);
+    let launcher = std::sync::Arc::new(AgentLauncher::new(port, store.clone(), relaunch_tx));
+    let (first_turn_tx, _first_turn_rx) = tokio::sync::mpsc::channel(64);
+    let bridge = std::sync::Arc::new(AgentBridge::new(store.clone(), first_turn_tx));
+
+    AgentState {
+        launcher,
+        bridge,
+        store,
+        models,
+    }
+}
+
 async fn run_gateway(
     config: SafeClawConfig,
     host: String,
@@ -159,22 +205,123 @@ async fn run_gateway(
 ) -> Result<()> {
     tracing::info!("Starting SafeClaw Gateway");
 
+    let models = config.models.clone();
+
     let gateway = GatewayBuilder::new()
         .config(config)
-        .host(host)
+        .host(&host)
         .port(port)
         .tee_enabled(tee_enabled)
         .build();
 
     gateway.start().await?;
 
-    tracing::info!("SafeClaw Gateway is running. Press Ctrl+C to stop.");
+    // Build agent router with CORS for cross-origin UI access
+    let agent_state = build_agent_state(port, models);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+    let app = agent_router(agent_state).layer(cors);
 
-    // Wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .context("Invalid listen address")?;
+
+    tracing::info!(%addr, "SafeClaw Gateway listening");
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+        .context("HTTP server error")?;
 
     tracing::info!("Shutting down...");
     gateway.stop().await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// run_serve — start SafeClaw as backend service behind a3s-gateway
+// ---------------------------------------------------------------------------
+
+async fn run_serve(
+    mut config: SafeClawConfig,
+    host: String,
+    port: u16,
+    tee_enabled: bool,
+) -> Result<()> {
+    // Enable a3s-gateway integration mode
+    config.a3s_gateway.enabled = true;
+
+    tracing::info!("Starting SafeClaw in backend service mode (behind a3s-gateway)");
+
+    let gateway = std::sync::Arc::new(
+        GatewayBuilder::new()
+            .config(config.clone())
+            .host(&host)
+            .port(port)
+            .tee_enabled(tee_enabled)
+            .build(),
+    );
+
+    gateway.start().await?;
+
+    // Build HTTP API router for a3s-gateway to proxy to, merged with agent router
+    let agent_state = build_agent_state(port, config.models.clone());
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+    let app = safeclaw::gateway::ApiHandler::router(gateway.clone())
+        .merge(agent_router(agent_state))
+        .layer(cors);
+
+    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .context("Invalid listen address")?;
+
+    tracing::info!(%addr, "SafeClaw backend service listening");
+    tracing::info!("Waiting for traffic from a3s-gateway");
+
+    // Generate gateway config hint
+    let gw_toml = safeclaw::gateway::generate_gateway_config(&config);
+    tracing::debug!("Suggested a3s-gateway config:\n{}", gw_toml);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
+        .await
+        .context("HTTP server error")?;
+
+    tracing::info!("Shutting down...");
+    gateway.stop().await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// generate_gateway_config — output a3s-gateway TOML for SafeClaw
+// ---------------------------------------------------------------------------
+
+fn generate_gateway_config(
+    config: &SafeClawConfig,
+    output: Option<&std::path::Path>,
+) -> Result<()> {
+    let toml = safeclaw::gateway::generate_gateway_config(config);
+
+    if let Some(path) = output {
+        std::fs::write(path, &toml)
+            .with_context(|| format!("Failed to write gateway config to {}", path.display()))?;
+        println!("Gateway config written to: {}", path.display());
+    } else {
+        println!("{}", toml);
+    }
 
     Ok(())
 }
