@@ -16,6 +16,15 @@ pub struct TeeClient {
     connected: Arc<RwLock<bool>>,
 }
 
+impl std::fmt::Debug for TeeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TeeClient")
+            .field("config", &self.config)
+            .field("connected", &self.connected)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TeeClient {
     /// Create a new TEE client
     pub fn new(config: TeeConfig) -> Self {

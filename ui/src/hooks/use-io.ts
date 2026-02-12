@@ -1,4 +1,4 @@
-import constants from '@/constants';
+import { getGatewayUrl } from '@/models/settings.model';
 import { useReactive } from 'ahooks';
 import { useCallback, useEffect } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -18,7 +18,7 @@ export const useIo = (namespace?: string) => {
     const connect = useCallback(() => {
         if (!state.socket) {
             state.isConnecting = true;
-            state.socket = io(`${constants.gatewayUrl}${namespace}`);
+            state.socket = io(`${getGatewayUrl()}${namespace}`);
             state.socket.on('connect', () => {
                 state.isConnected = true;
                 state.isConnecting = false;

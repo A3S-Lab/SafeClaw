@@ -4,7 +4,6 @@ use crate::channels::InboundMessage;
 use crate::error::Result;
 use crate::privacy::{ClassificationResult, Classifier, PolicyDecision, PolicyEngine};
 use crate::session::SessionManager;
-use crate::tee::TeeManager;
 use std::sync::Arc;
 
 /// Routing decision for a message
@@ -23,7 +22,6 @@ pub struct RoutingDecision {
 /// Session router that handles message routing based on privacy
 pub struct SessionRouter {
     session_manager: Arc<SessionManager>,
-    tee_manager: Arc<TeeManager>,
     classifier: Arc<Classifier>,
     policy_engine: Arc<PolicyEngine>,
 }
@@ -32,13 +30,11 @@ impl SessionRouter {
     /// Create a new session router
     pub fn new(
         session_manager: Arc<SessionManager>,
-        tee_manager: Arc<TeeManager>,
         classifier: Arc<Classifier>,
         policy_engine: Arc<PolicyEngine>,
     ) -> Self {
         Self {
             session_manager,
-            tee_manager,
             classifier,
             policy_engine,
         }
@@ -58,7 +54,7 @@ impl SessionRouter {
 
         // Determine if TEE is needed
         let use_tee = matches!(policy_decision, PolicyDecision::ProcessInTee)
-            && self.tee_manager.is_enabled();
+            && self.session_manager.is_tee_enabled();
 
         // Get or create session
         let session = self
@@ -79,19 +75,8 @@ impl SessionRouter {
         session.update_sensitivity(classification.level).await;
 
         // If TEE is needed and session doesn't have TEE, upgrade it
-        if use_tee && !session.uses_tee {
-            // Create TEE session
-            let tee_session = self
-                .tee_manager
-                .create_session(&message.sender_id, &message.channel)
-                .await?;
-
-            // Note: In a real implementation, we'd update the session to use TEE
-            tracing::info!(
-                "Upgraded session {} to use TEE session {}",
-                session.id,
-                tee_session.id
-            );
+        if use_tee && !session.uses_tee().await {
+            self.session_manager.upgrade_to_tee(&session.id).await?;
         }
 
         // Update session activity
@@ -109,7 +94,8 @@ impl SessionRouter {
     /// Check if a message requires TEE processing
     pub fn requires_tee(&self, message: &InboundMessage) -> bool {
         let classification = self.classifier.classify(&message.content);
-        self.policy_engine.requires_tee(classification.level) && self.tee_manager.is_enabled()
+        self.policy_engine.requires_tee(classification.level)
+            && self.session_manager.is_tee_enabled()
     }
 
     /// Get redacted version of message content
@@ -130,19 +116,18 @@ mod tests {
     use crate::privacy::Classifier;
 
     fn create_test_router() -> SessionRouter {
-        let session_manager = Arc::new(SessionManager::new());
         // Disable TEE for tests to avoid connection requirements
         let tee_config = TeeConfig {
             enabled: false,
             ..Default::default()
         };
-        let tee_manager = Arc::new(TeeManager::new(tee_config));
+        let session_manager = Arc::new(SessionManager::new(tee_config));
         let privacy_config = PrivacyConfig::default();
         let classifier =
             Arc::new(Classifier::new(privacy_config.rules, privacy_config.default_level).unwrap());
         let policy_engine = Arc::new(PolicyEngine::new());
 
-        SessionRouter::new(session_manager, tee_manager, classifier, policy_engine)
+        SessionRouter::new(session_manager, classifier, policy_engine)
     }
 
     #[tokio::test]

@@ -6,6 +6,13 @@
   "permissions": [
     "core:default",
     "shell:allow-open",
-    "http:default"
+    "http:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://gamma-api.polymarket.com/**" },
+        { "url": "https://polymarket.com/**" }
+      ]
+    }
   ]
 }

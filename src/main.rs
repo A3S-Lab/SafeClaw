@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use safeclaw::{
-    agent::{agent_router, AgentBridge, AgentLauncher, AgentSessionStore, AgentState},
+    agent::{agent_router, AgentEngine, AgentSessionStore, AgentState},
     config::{
-        ChannelsConfig, DingTalkConfig, DiscordConfig, FeishuConfig, GatewayConfig,
-        ModelProviderConfig, ModelsConfig, SafeClawConfig, SlackConfig, TeeBackend, TeeConfig,
-        TelegramConfig, WeComConfig, WebChatConfig,
+        resolve_api_keys_from_env, ChannelsConfig, DingTalkConfig, DiscordConfig, FeishuConfig,
+        GatewayConfig, ModelProviderConfig, ModelsConfig, SafeClawConfig, SlackConfig, TeeBackend,
+        TeeConfig, TelegramConfig, WeComConfig, WebChatConfig,
     },
     gateway::GatewayBuilder,
 };
@@ -182,19 +182,35 @@ async fn main() -> Result<()> {
 }
 
 /// Build the shared agent state used by the agent HTTP/WS router.
-fn build_agent_state(port: u16, models: ModelsConfig) -> AgentState {
-    let store = std::sync::Arc::new(AgentSessionStore::new(AgentSessionStore::default_dir()));
-    let (relaunch_tx, _relaunch_rx) = tokio::sync::mpsc::channel(64);
-    let launcher = std::sync::Arc::new(AgentLauncher::new(port, store.clone(), relaunch_tx));
-    let (first_turn_tx, _first_turn_rx) = tokio::sync::mpsc::channel(64);
-    let bridge = std::sync::Arc::new(AgentBridge::new(store.clone(), first_turn_tx));
+///
+/// Creates an `AgentEngine` that wraps a3s-code's `SessionManager` in-process,
+/// replacing the previous CLI subprocess architecture.
+async fn build_agent_state(models: ModelsConfig) -> Result<AgentState> {
+    let resolved_keys = resolve_api_keys_from_env(&models);
+    let sessions_dir = AgentSessionStore::default_dir();
+    let code_config = models.to_code_config(&resolved_keys, Some(sessions_dir.clone()));
 
-    AgentState {
-        launcher,
-        bridge,
-        store,
-        models,
-    }
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .to_string_lossy()
+        .to_string();
+    let tool_executor = std::sync::Arc::new(a3s_code::tools::ToolExecutor::with_config(
+        cwd,
+        &code_config,
+    ));
+    let session_manager = std::sync::Arc::new(
+        a3s_code::session::SessionManager::with_persistence(None, tool_executor, &sessions_dir)
+            .await
+            .context("Failed to create SessionManager")?,
+    );
+    let store = std::sync::Arc::new(AgentSessionStore::new(sessions_dir.join("ui-state")));
+    let engine = std::sync::Arc::new(
+        AgentEngine::new(session_manager, code_config, store)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create AgentEngine: {}", e))?,
+    );
+
+    Ok(AgentState { engine, models })
 }
 
 async fn run_gateway(
@@ -217,7 +233,7 @@ async fn run_gateway(
     gateway.start().await?;
 
     // Build agent router with CORS for cross-origin UI access
-    let agent_state = build_agent_state(port, models);
+    let agent_state = build_agent_state(models).await?;
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -271,7 +287,7 @@ async fn run_serve(
     gateway.start().await?;
 
     // Build HTTP API router for a3s-gateway to proxy to, merged with agent router
-    let agent_state = build_agent_state(port, config.models.clone());
+    let agent_state = build_agent_state(config.models.clone()).await?;
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)

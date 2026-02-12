@@ -1,5 +1,6 @@
 import { ModalProvider } from "@/components/custom/modal-provider";
 import { ThemeProvider } from "@/components/custom/theme-provider";
+import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
@@ -21,6 +22,7 @@ if (rootEl) {
 			<ModalProvider>
 				<TooltipProvider>
 					<RouterProvider router={router} />
+					<Toaster position="top-right" duration={3000} />
 				</TooltipProvider>
 			</ModalProvider>
 		</ThemeProvider>,

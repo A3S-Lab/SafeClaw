@@ -31,7 +31,7 @@ export default function ChatLayout() {
 						aliveRef={aliveRef}
 						activeCacheKey={currentCacheKey}
 						transition
-						max={18}
+						max={5}
 					>
 						<AnimatePresence>
 							<motion.div
@@ -40,7 +40,7 @@ export default function ChatLayout() {
 								initial={{ opacity: 0, filter: "blur(8px)" }}
 								animate={{ opacity: 1, filter: "blur(0)" }}
 								exit={{ opacity: 0, filter: "blur(8px)" }}
-								transition={{ duration: 0.5, ease: "easeInOut" }}
+								transition={{ duration: 0.25, ease: "easeInOut" }}
 							>
 								<Await resolve={globalModel.load()}>
 									{() => {

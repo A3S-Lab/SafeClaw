@@ -247,6 +247,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Session Isolation**: Strict memory isolation between users
 - **Distributed TEE**: Split sensitive tasks across multiple isolated environments
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
+- **Direct Agent Integration**: In-process a3s-code library integration via `AgentEngine`, replacing CLI subprocess bridging with native `SessionManager` calls, streaming `AgentEvent` translation, and multi-provider LLM support
 
 ## Quick Start
 
@@ -286,6 +287,27 @@ safeclaw config --default
 
 > For a high-level overview of security architecture, see [Security Architecture](#security-architecture) above.
 
+### Dependency Graph (Redesigned)
+
+```
+                    a3s-privacy (shared types)
+                   /        |          \
+                  /         |           \
+a3s-gateway    safeclaw    a3s-code/security
+     ↑            |    \
+     |            |     └── a3s-transport (Transport trait)
+  discovery       |              |
+  (not dep)       └──── a3s-box-runtime (TeeRuntime)
+                              |
+                        a3s-transport
+```
+
+Key design principles:
+- **a3s-privacy**: Single source of truth for `SensitivityLevel`, `ClassificationRule`, regex patterns
+- **a3s-transport**: Unified `Transport` trait with vsock, mock implementations and shared framing protocol
+- **a3s-gateway** discovers SafeClaw via health endpoints (not config generation)
+- **a3s-code/security** is a generic security module (not SafeClaw-specific)
+
 ### System Components
 
 ```
@@ -310,22 +332,22 @@ safeclaw config --default
 │  └───────────────────────────┬───────────────────────────────┘   │
 │                              │                                     │
 │  ┌───────────────────────────▼───────────────────────────────┐   │
-│  │                   Privacy Classifier                       │   │
-│  │  - Classify data sensitivity                               │   │
+│  │              Privacy Classifier (a3s-privacy)              │   │
+│  │  - Shared classification rules (single source of truth)    │   │
 │  │  - Route sensitive data to TEE                             │   │
 │  │  - Handle encryption/decryption                            │   │
 │  └───────────────────────────┬───────────────────────────────┘   │
 └──────────────────────────────┼────────────────────────────────────┘
-                               │ vsock / encrypted channel
+                               │ a3s-transport (vsock port 4091)
 ┌──────────────────────────────▼────────────────────────────────────┐
 │                    TEE Environment (A3S Box)                       │
 │  ┌─────────────────────────────────────────────────────────────┐  │
 │  │                    Secure Agent Runtime                      │  │
 │  │  ┌─────────────────┐  ┌─────────────────────────────────┐   │  │
 │  │  │  A3S Code Agent │  │     Secure Data Store           │   │  │
-│  │  │  - LLM Client   │  │  - Encrypted credentials        │   │  │
-│  │  │  - Tool Exec    │  │  - Private conversation history │   │  │
-│  │  │  - HITL         │  │  - Sensitive user data          │   │  │
+│  │  │  + Security     │  │  - Encrypted credentials        │   │  │
+│  │  │    Guards       │  │  - Private conversation history │   │  │
+│  │  │  (a3s-privacy)  │  │  - Sensitive user data          │   │  │
 │  │  └─────────────────┘  └─────────────────────────────────┘   │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │                         MicroVM (Hardware Isolated)                │
@@ -1240,8 +1262,14 @@ safeclaw/
 ├── src/
 │   ├── lib.rs              # Library entry point
 │   ├── main.rs             # CLI entry point
-│   ├── config.rs           # Configuration management (JSON)
+│   ├── config.rs           # Configuration management (JSON, ModelsConfig → CodeConfig mapping)
 │   ├── error.rs            # Error types
+│   ├── agent/              # Agent module (direct a3s-code integration)
+│   │   ├── mod.rs          # Module re-exports
+│   │   ├── engine.rs       # AgentEngine — wraps SessionManager, event translation
+│   │   ├── handler.rs      # REST + WebSocket handlers (axum)
+│   │   ├── session_store.rs # UI state persistence (JSON files)
+│   │   └── types.rs        # Browser message types, session state
 │   ├── channels/           # Multi-channel adapters
 │   │   ├── adapter.rs      # Channel adapter trait
 │   │   ├── message.rs      # Message types
@@ -1271,6 +1299,40 @@ safeclaw/
 │       └── protocol.rs     # Communication protocol
 ```
 
+## Known Architecture Issues
+
+> **Status**: The following issues were identified during a design review. They are tracked here for transparency and will be addressed in the Architecture Redesign phases below.
+
+### 1. TEE Client Is Stub-Only
+
+`TeeClient::send_request()` calls `simulate_tee_response()` — a hardcoded `{"status": "ok"}`. The `SecureChannel` handshake never completes, `pending_requests` is dead code, and serialized payloads are discarded. The entire upper layer (TeeManager, SessionRouter, gateway integration) is built on top of this fake. **No real vsock transport protocol has been designed** — no framing, no backpressure, no reconnection, no multiplexing.
+
+### 2. Duplicated Privacy Classification (Security Defect)
+
+`SensitivityLevel`, `ClassificationRule`, and `default_classification_rules()` are independently defined in both SafeClaw and a3s-code with **incompatible regex patterns**:
+
+| Rule | SafeClaw pattern | a3s-code pattern |
+|------|-----------------|-----------------|
+| `credit_card` | `\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b` | `\b(?:\d[ -]*?){13,16}\b` |
+| `email` | `[A-Z\|a-z]{2,}` (literal pipe in char class) | `[A-Za-z]{2,}` (correct) |
+| `api_key` | `(sk-\|api[_-]?key\|token)` | `(?:sk\|pk\|api\|key\|token\|secret\|password)` |
+
+The same credit card number may match in one crate but not the other. SafeClaw's `SensitivityLevel` lacks `Ord` and uses fragile `as u8` casts; a3s-code's version properly derives `Ord`.
+
+### 3. Two Parallel Session Systems
+
+`session::SessionManager` uses `user_id:channel_id:chat_id` keys; `tee::TeeManager` uses `user_id:channel_id` keys. `SessionRouter` tries to bridge them, but `Session` is behind `Arc` without interior mutability — `enable_tee(&mut self)` is structurally impossible to call. TEE upgrade mid-session cannot work.
+
+### 4. Gateway Config Generation Direction Is Inverted
+
+SafeClaw generates TOML config for a3s-gateway via string concatenation. The backend service should not know the infrastructure layer's config schema. This creates a fragile coupling where gateway config changes require SafeClaw updates.
+
+### 5. vsock Port Conflict
+
+SafeClaw's `TeeConfig` defaults to vsock port 4089, which collides with a3s-box's exec server. Three different protocols (HTTP, binary frames, JSON) are planned for vsock with no shared framing layer.
+
+---
+
 ## Roadmap
 
 ### Phase 1: Foundation ✅
@@ -1280,7 +1342,7 @@ safeclaw/
 - [x] Policy engine for routing decisions
 - [x] Session management
 - [x] Cryptographic utilities (X25519, AES-GCM)
-- [x] TEE client and protocol
+- [x] TEE client and protocol (stub)
 - [x] Memory system — three-layer data hierarchy:
   - [x] Layer 1 (Resource): Raw classified content with privacy routing, ResourceStore, PrivacyGate
   - [x] Layer 2 (Artifact): Structured knowledge extraction from Resources, ArtifactStore, Extractor
@@ -1299,26 +1361,79 @@ Channel adapters are now provided by **a3s-gateway** (Phase 3: AI Agent Gateway)
 - [ ] Slack adapter (via a3s-gateway)
 - [ ] Discord adapter (via a3s-gateway)
 
-### Phase 3: Gateway Integration (depends on a3s-gateway) 🚧
+### Phase 3: Architecture Redesign 🚧
 
-SafeClaw's networking layer is now delegated to **a3s-gateway**. Instead of building a custom gateway, SafeClaw runs as a backend service behind A3S Gateway, which provides reverse proxy, routing, middleware, and multi-channel ingestion.
+Address structural issues identified in design review. See [Known Architecture Issues](#known-architecture-issues) for details.
 
-- [x] ~~Gateway server structure~~ → Replaced by a3s-gateway
-- [x] ~~HTTP API endpoints~~ → Exposed as backend service behind a3s-gateway
-- [x] ~~WebSocket handler~~ → WebSocket proxying handled by a3s-gateway
-- [ ] **Register SafeClaw as a3s-gateway backend service**
-- [ ] **Define Gateway routing rules** for SafeClaw endpoints (privacy-aware routing)
-- [ ] **Authentication & authorization** via a3s-gateway middleware pipeline (API key, JWT, OAuth2)
-- [ ] **Rate limiting** via a3s-gateway middleware
-- [ ] **Token metering** via a3s-gateway for per-user/agent LLM usage tracking
-- [ ] **Conversation affinity** via a3s-gateway sticky sessions for multi-turn conversations
-- [ ] **TEE routing rules** in a3s-gateway for privacy-sensitive requests → SafeClaw TEE backend
+#### Phase 3.1: Extract Shared Privacy Types (P0 — Security Fix) ✅
 
-### Phase 4: TEE Security 📋
+Extracted duplicated privacy types into shared `a3s-privacy` crate. All 3 consumers migrated.
 
-Core TEE integration with A3S Box:
+- [x] **`a3s-privacy` crate**: Single source of truth for privacy classification (60 tests)
+  - [x] `SensitivityLevel` enum (with `Ord`, `Display`, `Default`)
+  - [x] `ClassificationRule` struct (with `description` field)
+  - [x] `default_classification_rules()` — unified regex patterns (fixed email pipe bug, credit card range)
+  - [x] `RegexClassifier` — pre-compiled classifier with match positions, redaction, TEE routing
+  - [x] `KeywordMatcher` — lightweight keyword-based classifier for gateway routing
+  - [x] `RedactionStrategy` — Mask, Remove, Hash modes
+  - [x] `default_dangerous_commands()` — exfiltration detection patterns
+- [x] **Migrate SafeClaw**: `privacy/classifier.rs` wraps `a3s-privacy::RegexClassifier`, `config.rs` re-exports shared types
+- [x] **Migrate a3s-code**: `safeclaw/config.rs` re-exports shared types, `classifier.rs` wraps `a3s-privacy::RegexClassifier`
+- [x] **Migrate a3s-gateway**: `privacy_router.rs` delegates to `a3s-privacy::KeywordMatcher` with `PrivacyLevel` ↔ `SensitivityLevel` mapping
 
-- [ ] **vsock Communication**: Real vsock channel to A3S Box MicroVM
+#### Phase 3.2: Unified Transport Layer (P0 — Foundation) 🚧
+
+`a3s-transport` crate implemented (28 tests). Consumer migration pending.
+
+- [x] **`a3s-transport` crate**: Shared transport abstraction
+  - [x] `Transport` trait (`connect`, `send`, `recv`, `close`) — async, object-safe, Send+Sync
+  - [x] Unified frame protocol: `[type:u8][length:u32 BE][payload]` with 16 MiB max
+  - [x] `MockTransport` for testing (replaces `simulate_tee_response`)
+  - [x] `TeeMessage`, `TeeRequest`, `TeeResponse` protocol types
+- [x] **Port allocation** (no conflicts):
+  - [x] 4088: gRPC agent control
+  - [x] 4089: exec server
+  - [x] 4090: PTY server
+  - [x] 4091: TEE secure channel (new)
+- [ ] **Migrate a3s-box**: exec server and PTY server adopt shared framing
+- [ ] **Migrate SafeClaw**: `TeeClient` accepts `impl Transport`, uses port 4091
+
+#### Phase 3.25: Direct a3s-code Library Integration (P0) ✅
+
+Replaced CLI subprocess bridging (launcher.rs + bridge.rs + NDJSON protocol) with direct in-process a3s-code library calls via `AgentEngine`.
+
+- [x] **`AgentEngine`**: Wraps `SessionManager`, manages per-session UI state, translates `AgentEvent` → `BrowserIncomingMessage`
+- [x] **Config mapping**: `ModelsConfig::to_code_config()` maps SafeClaw config to a3s-code `CodeConfig` with multi-provider support
+- [x] **Handler rewrite**: All REST/WebSocket handlers delegate to engine (no CLI subprocess)
+- [x] **Type cleanup**: Removed all CLI/NDJSON types (`CliMessage`, `CliSystemMessage`, etc.)
+- [x] **Deleted**: `bridge.rs`, `launcher.rs` (subprocess management replaced by in-process calls)
+
+#### Phase 3.3: Merge Session Systems (P1)
+
+Eliminate the parallel `SessionManager` + `TeeManager`:
+
+- [ ] **Unified `Session` type** with interior mutability (`RwLock` on state fields)
+  - [ ] `tee: Option<TeeHandle>` — None = no TEE, Some = active TEE session
+  - [ ] `TeeHandle` owns `Transport` + `SecureChannel` + `TeeState`
+  - [ ] `upgrade_to_tee()` method that works through `Arc<Session>`
+- [ ] **Single `SessionManager`** with unified key format
+- [ ] **Delete `tee::TeeManager`** — TEE lifecycle managed within Session
+
+#### Phase 3.4: Reverse Gateway Integration (P1)
+
+Replace config generation with service discovery:
+
+- [ ] **SafeClaw exposes** `GET /health` and `GET /.well-known/a3s-service.json`
+- [ ] **a3s-gateway discovers** SafeClaw via health endpoint polling
+- [ ] **Delete** `gateway/integration.rs` (TOML string concatenation)
+- [ ] **Routing rules** owned by gateway config, not generated by SafeClaw
+
+### Phase 4: TEE Security (depends on Phase 3.2) 📋
+
+Core TEE integration with A3S Box, built on the real transport layer:
+
+- [ ] **Real vsock Communication**: Via `a3s-transport::VsockTransport` to A3S Box MicroVM
+- [ ] **A3S Box `TeeRuntime` API**: High-level `spawn_verified()` that boots VM + attests + establishes secure channel in one call
 - [ ] **Remote Attestation Framework**:
   - [ ] Quote generation and verification
   - [ ] Attestation service integration (Intel IAS / Azure MAA)
@@ -1333,9 +1448,9 @@ Core TEE integration with A3S Box:
   - [ ] Version-based rollback protection
   - [ ] Secure credential storage
 
-### Phase 5: AI Agent Leakage Prevention 📋
+### Phase 5: AI Agent Leakage Prevention (depends on Phase 3.1) 📋
 
-Prevent A3S Code from leaking sensitive data inside TEE:
+Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification.
 
 - [ ] **Output Sanitizer**:
   - [ ] Scan AI output for tainted data before sending to user
@@ -1387,7 +1502,7 @@ Split-Process-Merge architecture with local LLM coordination. A3S Gateway handle
   - [ ] General Worker pool (REE environment)
   - [ ] Dynamic worker allocation based on task sensitivity
   - [ ] Worker health monitoring and failover (a3s-gateway health checks)
-- [ ] **Inter-TEE Communication** (routed via a3s-gateway):
+- [ ] **Inter-TEE Communication** (via `a3s-transport`):
   - [ ] Secure channels between Coordinator and Workers
   - [ ] Data minimization enforcement (need-to-know basis)
   - [ ] Cross-TEE attestation verification
@@ -1491,7 +1606,7 @@ cargo build
 
 ### Test
 
-**184 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, and TEE integration.
+**239 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, and event translation.
 
 ```bash
 cargo test

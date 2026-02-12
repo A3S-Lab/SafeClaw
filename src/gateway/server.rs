@@ -8,7 +8,7 @@ use crate::config::SafeClawConfig;
 use crate::error::{Error, Result};
 use crate::privacy::{Classifier, PolicyEngine};
 use crate::session::{SessionManager, SessionRouter};
-use crate::tee::TeeManager;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -31,7 +31,6 @@ pub struct Gateway {
     config: SafeClawConfig,
     state: Arc<RwLock<GatewayState>>,
     session_manager: Arc<SessionManager>,
-    tee_manager: Arc<TeeManager>,
     session_router: Arc<SessionRouter>,
     channels: Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>>,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -43,8 +42,7 @@ impl Gateway {
     pub fn new(config: SafeClawConfig) -> Self {
         let (event_tx, event_rx) = mpsc::channel(1000);
 
-        let session_manager = Arc::new(SessionManager::new());
-        let tee_manager = Arc::new(TeeManager::new(config.tee.clone()));
+        let session_manager = Arc::new(SessionManager::new(config.tee.clone()));
 
         let classifier = Arc::new(
             Classifier::new(config.privacy.rules.clone(), config.privacy.default_level)
@@ -54,7 +52,6 @@ impl Gateway {
 
         let session_router = Arc::new(SessionRouter::new(
             session_manager.clone(),
-            tee_manager.clone(),
             classifier,
             policy_engine,
         ));
@@ -63,7 +60,6 @@ impl Gateway {
             config,
             state: Arc::new(RwLock::new(GatewayState::Stopped)),
             session_manager,
-            tee_manager,
             session_router,
             channels: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
@@ -87,9 +83,9 @@ impl Gateway {
 
         tracing::info!("Starting SafeClaw Gateway");
 
-        // Initialize TEE manager
+        // Initialize TEE subsystem
         if self.config.tee.enabled {
-            self.tee_manager.init().await?;
+            self.session_manager.init_tee().await?;
         }
 
         // Initialize channels
@@ -132,9 +128,9 @@ impl Gateway {
             }
         }
 
-        // Shutdown TEE manager
+        // Shutdown TEE subsystem
         if self.config.tee.enabled {
-            self.tee_manager.shutdown().await?;
+            self.session_manager.shutdown_tee().await?;
         }
 
         *self.state.write().await = GatewayState::Stopped;
@@ -207,13 +203,13 @@ impl Gateway {
         let event_rx = self.event_rx.write().await.take();
         if let Some(mut rx) = event_rx {
             let session_router = self.session_router.clone();
-            let tee_manager = self.tee_manager.clone();
+            let session_manager = self.session_manager.clone();
             let channels = self.channels.clone();
 
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     if let Err(e) =
-                        Self::handle_event(event, &session_router, &tee_manager, &channels).await
+                        Self::handle_event(event, &session_router, &session_manager, &channels).await
                     {
                         tracing::error!("Error handling event: {}", e);
                     }
@@ -226,7 +222,7 @@ impl Gateway {
     async fn handle_event(
         event: ChannelEvent,
         session_router: &Arc<SessionRouter>,
-        tee_manager: &Arc<TeeManager>,
+        session_manager: &Arc<SessionManager>,
         channels: &Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>>,
     ) -> Result<()> {
         match event {
@@ -250,9 +246,9 @@ impl Gateway {
 
                 // Process the message
                 let response = if decision.use_tee {
-                    // Process in TEE
-                    tee_manager
-                        .process_message(&decision.session_id, &message.content)
+                    // Process in TEE via unified session manager
+                    session_manager
+                        .process_in_tee(&decision.session_id, &message.content)
                         .await?
                 } else {
                     // Process locally (placeholder)
@@ -294,11 +290,6 @@ impl Gateway {
         &self.session_manager
     }
 
-    /// Get TEE manager
-    pub fn tee_manager(&self) -> &Arc<TeeManager> {
-        &self.tee_manager
-    }
-
     /// Get session router
     pub fn session_router(&self) -> &Arc<SessionRouter> {
         &self.session_router
@@ -318,6 +309,153 @@ impl Gateway {
     pub fn channels(&self) -> &Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>> {
         &self.channels
     }
+
+    /// Get event sender for injecting external events (e.g., from a3s-gateway webhooks)
+    pub fn event_sender(&self) -> &mpsc::Sender<ChannelEvent> {
+        &self.event_tx
+    }
+
+    // --- Public API for a3s-gateway integration ---
+
+    /// Process an inbound message and return a response
+    ///
+    /// This is the main entry point for a3s-gateway to call when it receives
+    /// a message routed to SafeClaw. The message is routed through the privacy
+    /// classifier and session router, then processed in TEE or locally.
+    pub async fn process_message(
+        &self,
+        message: crate::channels::InboundMessage,
+    ) -> Result<ProcessedResponse> {
+        // Route the message
+        let decision = self.session_router.route(&message).await?;
+
+        tracing::debug!(
+            session = %decision.session_id,
+            use_tee = decision.use_tee,
+            level = ?decision.classification.level,
+            "Routing decision"
+        );
+
+        // Process the message
+        let response_content = if decision.use_tee {
+            self.session_manager
+                .process_in_tee(&decision.session_id, &message.content)
+                .await?
+        } else {
+            format!("Received: {}", message.content)
+        };
+
+        // Build outbound message
+        let outbound = crate::channels::OutboundMessage::new(
+            &message.channel,
+            &message.chat_id,
+            &response_content,
+        )
+        .reply_to(&message.channel_message_id);
+
+        Ok(ProcessedResponse {
+            session_id: decision.session_id,
+            use_tee: decision.use_tee,
+            sensitivity: format!("{:?}", decision.classification.level),
+            outbound,
+        })
+    }
+
+    /// Process a webhook payload from a3s-gateway
+    ///
+    /// When a3s-gateway receives a webhook from a channel (Telegram, Slack, etc.),
+    /// it forwards the raw payload here. SafeClaw parses it using the appropriate
+    /// channel adapter and processes the message.
+    pub async fn process_webhook(
+        &self,
+        channel: &str,
+        payload: &str,
+    ) -> Result<Option<ProcessedResponse>> {
+        // Parse the webhook payload into an InboundMessage
+        let message = match channel {
+            "telegram" | "slack" | "discord" | "feishu" | "dingtalk" | "wecom" => {
+                // Create a basic inbound message from webhook payload
+                // In production, each channel adapter would parse its specific format
+                let parsed: serde_json::Value =
+                    serde_json::from_str(payload).map_err(|e| Error::Channel(e.to_string()))?;
+
+                let content = parsed["content"]
+                    .as_str()
+                    .or_else(|| parsed["text"].as_str())
+                    .or_else(|| parsed["message"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if content.is_empty() {
+                    return Ok(None);
+                }
+
+                let sender_id = parsed["sender_id"]
+                    .as_str()
+                    .or_else(|| parsed["user_id"].as_str())
+                    .or_else(|| parsed["from"].as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+
+                let chat_id = parsed["chat_id"]
+                    .as_str()
+                    .or_else(|| parsed["channel_id"].as_str())
+                    .unwrap_or(&sender_id)
+                    .to_string();
+
+                crate::channels::InboundMessage::new(channel, &sender_id, &chat_id, &content)
+            }
+            _ => {
+                return Err(Error::Channel(format!("Unknown channel: {}", channel)));
+            }
+        };
+
+        let response = self.process_message(message).await?;
+        Ok(Some(response))
+    }
+
+    /// Get gateway status information
+    pub async fn status(&self) -> GatewayStatus {
+        let state = *self.state.read().await;
+        let session_count = self.session_manager.session_count().await;
+        let channels = self.active_channel_names().await;
+
+        GatewayStatus {
+            state: format!("{:?}", state),
+            tee_enabled: self.config.tee.enabled,
+            session_count,
+            channels,
+            a3s_gateway_mode: self.config.a3s_gateway.enabled,
+        }
+    }
+}
+
+/// Response from processing a message
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessedResponse {
+    /// Session ID used for processing
+    pub session_id: String,
+    /// Whether TEE was used
+    pub use_tee: bool,
+    /// Sensitivity level detected
+    pub sensitivity: String,
+    /// Outbound message to send back
+    pub outbound: crate::channels::OutboundMessage,
+}
+
+/// Gateway status information
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayStatus {
+    /// Current state
+    pub state: String,
+    /// Whether TEE is enabled
+    pub tee_enabled: bool,
+    /// Number of active sessions
+    pub session_count: usize,
+    /// Active channel names
+    pub channels: Vec<String>,
+    /// Whether running behind a3s-gateway
+    pub a3s_gateway_mode: bool,
 }
 
 /// Builder for Gateway

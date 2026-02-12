@@ -111,8 +111,8 @@ impl WebSocketHandler {
                                         // Process message
                                         let response = if decision.use_tee {
                                             gateway_clone
-                                                .tee_manager()
-                                                .process_message(&decision.session_id, &content)
+                                                .session_manager()
+                                                .process_in_tee(&decision.session_id, &content)
                                                 .await
                                                 .unwrap_or_else(|e| format!("Error: {}", e))
                                         } else {

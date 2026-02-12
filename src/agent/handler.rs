@@ -1,11 +1,10 @@
 //! HTTP and WebSocket handlers for the agent module
 //!
-//! Provides REST API endpoints for session management and WebSocket
-//! upgrade handlers for CLI (NDJSON) and browser (JSON) connections.
+//! Provides REST API endpoints for session management and a WebSocket
+//! upgrade handler for browser connections.  All handlers delegate to
+//! `AgentEngine` which wraps a3s-code's `SessionManager` in-process.
 
-use crate::agent::bridge::AgentBridge;
-use crate::agent::launcher::AgentLauncher;
-use crate::agent::session_store::AgentSessionStore;
+use crate::agent::engine::AgentEngine;
 use crate::agent::types::*;
 use crate::config::ModelsConfig;
 use axum::{
@@ -26,9 +25,7 @@ use tokio::sync::mpsc;
 /// Shared state for agent handlers
 #[derive(Clone)]
 pub struct AgentState {
-    pub launcher: Arc<AgentLauncher>,
-    pub bridge: Arc<AgentBridge>,
-    pub store: Arc<AgentSessionStore>,
+    pub engine: Arc<AgentEngine>,
     pub models: ModelsConfig,
 }
 
@@ -41,13 +38,9 @@ pub fn agent_router(state: AgentState) -> Router {
         .route("/api/agent/sessions/:id", get(get_session))
         .route("/api/agent/sessions/:id", patch(update_session))
         .route("/api/agent/sessions/:id", delete(delete_session))
-        .route(
-            "/api/agent/sessions/:id/relaunch",
-            post(relaunch_session),
-        )
+        .route("/api/agent/sessions/:id/relaunch", post(relaunch_session))
         .route("/api/agent/backends", get(list_backends))
-        // WebSocket endpoints
-        .route("/ws/agent/cli/:id", get(ws_cli_upgrade))
+        // WebSocket endpoint (browser only — no more CLI subprocess)
         .route("/ws/agent/browser/:id", get(ws_browser_upgrade))
         .with_state(state)
 }
@@ -64,19 +57,16 @@ struct CreateSessionRequest {
     cwd: Option<String>,
 }
 
-/// Create a new agent session and spawn a CLI process
+/// Create a new agent session
 async fn create_session(
     State(state): State<AgentState>,
     Json(request): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // Ensure bridge session exists before spawning CLI
-    state.bridge.ensure_session(&session_id).await;
-
     match state
-        .launcher
-        .spawn(
+        .engine
+        .create_session(
             &session_id,
             request.model,
             request.permission_mode,
@@ -84,30 +74,26 @@ async fn create_session(
         )
         .await
     {
-        Ok(info) => (StatusCode::CREATED, Json(serde_json::to_value(info).unwrap())),
-        Err(e) => {
-            // Clean up bridge session on spawn failure
-            state.bridge.remove_session(&session_id).await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        }
+        Ok(info) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(info).unwrap()),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }
 
 /// List all agent sessions
 async fn list_sessions(State(state): State<AgentState>) -> impl IntoResponse {
-    let sessions = state.launcher.all_sessions().await;
+    let sessions = state.engine.list_sessions().await;
     Json(sessions)
 }
 
 /// Get a specific agent session by ID
-async fn get_session(
-    State(state): State<AgentState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.launcher.get_session(&id).await {
+async fn get_session(State(state): State<AgentState>, Path(id): Path<String>) -> impl IntoResponse {
+    match state.engine.get_session(&id).await {
         Some(info) => (StatusCode::OK, Json(serde_json::to_value(info).unwrap())),
         None => (
             StatusCode::NOT_FOUND,
@@ -129,7 +115,7 @@ async fn update_session(
     Path(id): Path<String>,
     Json(request): Json<UpdateSessionRequest>,
 ) -> impl IntoResponse {
-    if state.launcher.get_session(&id).await.is_none() {
+    if state.engine.get_session(&id).await.is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
@@ -137,53 +123,60 @@ async fn update_session(
     }
 
     if let Some(name) = request.name {
-        state.launcher.set_name(&id, name).await;
+        state.engine.set_name(&id, name).await;
     }
     if let Some(archived) = request.archived {
-        state.launcher.set_archived(&id, archived).await;
+        state.engine.set_archived(&id, archived).await;
     }
 
-    let info = state.launcher.get_session(&id).await.unwrap();
+    let info = state.engine.get_session(&id).await.unwrap();
     (StatusCode::OK, Json(serde_json::to_value(info).unwrap()))
 }
 
-/// Delete a session: kill CLI process and remove all state
+/// Delete a session and remove all state
 async fn delete_session(
     State(state): State<AgentState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if state.launcher.get_session(&id).await.is_none() {
+    if state.engine.get_session(&id).await.is_none() {
         return StatusCode::NOT_FOUND;
     }
 
-    // Kill CLI process if running
-    let _ = state.launcher.kill(&id).await;
-
-    // Remove from launcher, bridge, and disk
-    state.launcher.remove_session(&id).await;
-    state.bridge.remove_session(&id).await;
-    state.store.remove(&id).await;
+    let _ = state.engine.destroy_session(&id).await;
 
     StatusCode::NO_CONTENT
 }
 
-/// Relaunch a session's CLI process (kill + spawn with --resume)
+/// Relaunch a session (destroy + recreate with same config)
 async fn relaunch_session(
     State(state): State<AgentState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if state.launcher.get_session(&id).await.is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
-        );
-    }
-
-    match state.launcher.relaunch(&id).await {
-        Ok(()) => {
-            let info = state.launcher.get_session(&id).await.unwrap();
-            (StatusCode::OK, Json(serde_json::to_value(info).unwrap()))
+    let existing = match state.engine.get_session(&id).await {
+        Some(info) => info,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Session not found"})),
+            );
         }
+    };
+
+    // Destroy existing session
+    let _ = state.engine.destroy_session(&id).await;
+
+    // Recreate with same config
+    match state
+        .engine
+        .create_session(
+            &id,
+            existing.model,
+            existing.permission_mode,
+            Some(existing.cwd),
+        )
+        .await
+    {
+        Ok(info) => (StatusCode::OK, Json(serde_json::to_value(info).unwrap())),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -253,116 +246,8 @@ async fn list_backends(State(state): State<AgentState>) -> impl IntoResponse {
 }
 
 // =============================================================================
-// WebSocket handlers
+// WebSocket handler
 // =============================================================================
-
-/// WebSocket upgrade handler for CLI connections
-async fn ws_cli_upgrade(
-    ws: WebSocketUpgrade,
-    Path(session_id): Path<String>,
-    State(state): State<AgentState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_cli_ws(socket, session_id, state))
-}
-
-/// Handle CLI WebSocket connection (NDJSON protocol)
-///
-/// CLI sends newline-delimited JSON; each line is parsed into a `CliMessage`
-/// and routed through the bridge to connected browsers.
-async fn handle_cli_ws(socket: WebSocket, session_id: String, state: AgentState) {
-    tracing::info!(session_id = %session_id, "CLI WebSocket connected");
-
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    // Channel for bridge → CLI outbound messages
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-
-    // Register CLI sender with bridge
-    state.bridge.handle_cli_open(&session_id, tx).await;
-
-    // Mark process as connected in launcher
-    state.launcher.mark_connected(&session_id).await;
-
-    // Forward bridge → CLI messages
-    let send_session_id = session_id.clone();
-    let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_sender.send(Message::Text(msg)).await.is_err() {
-                tracing::debug!(session_id = %send_session_id, "CLI WebSocket send failed");
-                break;
-            }
-        }
-    });
-
-    // Receive CLI → bridge messages (NDJSON)
-    let recv_bridge = state.bridge.clone();
-    let recv_launcher = state.launcher.clone();
-    let recv_session_id = session_id.clone();
-    let recv_task = tokio::spawn(async move {
-        let mut buffer = String::new();
-
-        while let Some(Ok(msg)) = ws_receiver.next().await {
-            match msg {
-                Message::Text(text) => {
-                    buffer.push_str(&text);
-
-                    // Process all complete NDJSON lines from the buffer
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].to_string();
-                        buffer = buffer[newline_pos + 1..].to_string();
-
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-
-                        let messages = parse_ndjson(&line);
-                        for cli_msg in messages {
-                            // Extract CLI session ID from system.init for --resume
-                            if let CliMessage::System(ref sys) = cli_msg {
-                                if sys.subtype == "init" {
-                                    if let Some(ref cli_sid) = sys.session_id {
-                                        recv_launcher
-                                            .set_cli_session_id(
-                                                &recv_session_id,
-                                                cli_sid.clone(),
-                                            )
-                                            .await;
-                                    }
-                                }
-                            }
-
-                            recv_bridge
-                                .route_cli_message(&recv_session_id, cli_msg)
-                                .await;
-                        }
-                    }
-                }
-                Message::Close(_) => break,
-                _ => {}
-            }
-        }
-
-        // Process any remaining buffered data on disconnect
-        if !buffer.trim().is_empty() {
-            let messages = parse_ndjson(&buffer);
-            for cli_msg in messages {
-                recv_bridge
-                    .route_cli_message(&recv_session_id, cli_msg)
-                    .await;
-            }
-        }
-    });
-
-    tokio::select! {
-        _ = send_task => {}
-        _ = recv_task => {}
-    }
-
-    // Clean up CLI connection in bridge
-    state.bridge.handle_cli_close(&session_id).await;
-
-    tracing::info!(session_id = %session_id, "CLI WebSocket disconnected");
-}
 
 /// WebSocket upgrade handler for browser connections
 async fn ws_browser_upgrade(
@@ -387,12 +272,12 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Channel for bridge → browser outbound messages
+    // Channel for engine → browser outbound messages
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Register with bridge (sends session_init, history, pending permissions)
+    // Register with engine (sends session_init, history, pending permissions)
     let registered = state
-        .bridge
+        .engine
         .handle_browser_open(&session_id, &browser_id, tx)
         .await;
 
@@ -405,13 +290,11 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
             "type": "error",
             "message": "Session not found"
         });
-        let _ = ws_sender
-            .send(Message::Text(error_msg.to_string()))
-            .await;
+        let _ = ws_sender.send(Message::Text(error_msg.to_string())).await;
         return;
     }
 
-    // Forward bridge → browser messages
+    // Forward engine → browser messages
     let send_session_id = session_id.clone();
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
@@ -425,8 +308,8 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
         }
     });
 
-    // Receive browser → bridge messages (JSON)
-    let recv_bridge = state.bridge.clone();
+    // Receive browser → engine messages (JSON)
+    let recv_engine = state.engine.clone();
     let recv_session_id = session_id.clone();
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -434,8 +317,8 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
                 Message::Text(text) => {
                     match serde_json::from_str::<BrowserOutgoingMessage>(&text) {
                         Ok(browser_msg) => {
-                            recv_bridge
-                                .route_browser_message(&recv_session_id, browser_msg)
+                            recv_engine
+                                .handle_browser_message(&recv_session_id, browser_msg)
                                 .await;
                         }
                         Err(e) => {
@@ -460,9 +343,9 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
         _ = recv_task => {}
     }
 
-    // Clean up browser connection in bridge
+    // Clean up browser connection in engine
     state
-        .bridge
+        .engine
         .handle_browser_close(&session_id, &browser_id)
         .await;
 
@@ -476,35 +359,53 @@ async fn handle_browser_ws(socket: WebSocket, session_id: String, state: AgentSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::engine::AgentEngine;
     use crate::agent::session_store::AgentSessionStore;
+    use crate::config::{resolve_api_keys_from_env, ModelProviderConfig};
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
-    fn make_state() -> (AgentState, TempDir) {
+    async fn make_state() -> (AgentState, TempDir) {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
-        let store = Arc::new(AgentSessionStore::new(dir.path().to_path_buf()));
-        let (relaunch_tx, _) = mpsc::channel(10);
-        let launcher = Arc::new(AgentLauncher::new(3456, store.clone(), relaunch_tx));
-        let (first_turn_tx, _) = mpsc::channel(10);
-        let bridge = Arc::new(AgentBridge::new(store.clone(), first_turn_tx));
-        let state = AgentState {
-            launcher,
-            bridge,
-            store,
-            models: ModelsConfig::default(),
-        };
+
+        let models = ModelsConfig::default();
+        let keys = resolve_api_keys_from_env(&models);
+        let code_config = models.to_code_config(&keys, Some(dir.path().to_path_buf()));
+
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            .to_string_lossy()
+            .to_string();
+        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::with_config(
+            cwd,
+            &code_config,
+        ));
+        let session_manager = Arc::new(
+            a3s_code::session::SessionManager::with_persistence(None, tool_executor, dir.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(AgentSessionStore::new(dir.path().join("ui-state")));
+        let engine = Arc::new(
+            AgentEngine::new(session_manager, code_config, store)
+                .await
+                .unwrap(),
+        );
+
+        let state = AgentState { engine, models };
         (state, dir)
     }
 
-    #[test]
-    fn test_agent_state_is_clone() {
-        let (state, _dir) = make_state();
+    #[tokio::test]
+    async fn test_agent_state_is_clone() {
+        let (state, _dir) = make_state().await;
         let _cloned = state.clone();
     }
 
-    #[test]
-    fn test_agent_router_builds() {
-        let (state, _dir) = make_state();
+    #[tokio::test]
+    async fn test_agent_router_builds() {
+        let (state, _dir) = make_state().await;
         let _router = agent_router(state);
     }
 
@@ -525,7 +426,10 @@ mod tests {
 
     #[test]
     fn test_model_display_name_known_models() {
-        assert_eq!(model_display_name("claude-opus-4-20250514"), "Claude Opus 4");
+        assert_eq!(
+            model_display_name("claude-opus-4-20250514"),
+            "Claude Opus 4"
+        );
         assert_eq!(
             model_display_name("claude-sonnet-4-20250514"),
             "Claude Sonnet 4"
@@ -541,10 +445,7 @@ mod tests {
 
     #[test]
     fn test_model_display_name_unknown_falls_back() {
-        assert_eq!(
-            model_display_name("my-custom-model"),
-            "my-custom-model"
-        );
+        assert_eq!(model_display_name("my-custom-model"), "my-custom-model");
     }
 
     #[test]
@@ -583,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_backends_returns_config_models() {
-        let (state, _dir) = make_state();
+        let (state, _dir) = make_state().await;
         let response = list_backends(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -602,17 +503,16 @@ mod tests {
         }
 
         // Verify the default model is marked
-        let defaults: Vec<&serde_json::Value> =
-            backends.iter().filter(|b| b["is_default"] == true).collect();
+        let defaults: Vec<&serde_json::Value> = backends
+            .iter()
+            .filter(|b| b["is_default"] == true)
+            .collect();
         assert!(!defaults.is_empty());
     }
 
     #[tokio::test]
     async fn test_list_backends_custom_config() {
-        use crate::config::ModelProviderConfig;
-        use std::collections::HashMap;
-
-        let (mut state, _dir) = make_state();
+        let (mut state, _dir) = make_state().await;
         let mut providers = HashMap::new();
         providers.insert(
             "custom".to_string(),
@@ -648,55 +548,81 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions_empty() {
-        let (state, _dir) = make_state();
+        let (state, _dir) = make_state().await;
         let response = list_sessions(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
     async fn test_get_session_not_found() {
-        let (state, _dir) = make_state();
-        let response =
-            get_session(State(state), Path("nonexistent".to_string()))
-                .await
-                .into_response();
+        let (state, _dir) = make_state().await;
+        let response = get_session(State(state), Path("nonexistent".to_string()))
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_delete_session_not_found() {
-        let (state, _dir) = make_state();
-        let response =
-            delete_session(State(state), Path("nonexistent".to_string()))
-                .await
-                .into_response();
+        let (state, _dir) = make_state().await;
+        let response = delete_session(State(state), Path("nonexistent".to_string()))
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_relaunch_session_not_found() {
-        let (state, _dir) = make_state();
-        let response =
-            relaunch_session(State(state), Path("nonexistent".to_string()))
-                .await
-                .into_response();
+        let (state, _dir) = make_state().await;
+        let response = relaunch_session(State(state), Path("nonexistent".to_string()))
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_update_session_not_found() {
-        let (state, _dir) = make_state();
+        let (state, _dir) = make_state().await;
         let req = UpdateSessionRequest {
             name: Some("New Name".to_string()),
             archived: None,
         };
-        let response = update_session(
-            State(state),
-            Path("nonexistent".to_string()),
-            Json(req),
-        )
-        .await
-        .into_response();
+        let response = update_session(State(state), Path("nonexistent".to_string()), Json(req))
+            .await
+            .into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_create_and_get_session() {
+        let (state, _dir) = make_state().await;
+
+        let req = CreateSessionRequest {
+            model: None,
+            permission_mode: None,
+            cwd: Some("/tmp".to_string()),
+        };
+        let response = create_session(State(state.clone()), Json(req))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 64)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let session_id = info["session_id"].as_str().unwrap().to_string();
+
+        // Should be findable
+        let response = get_session(State(state.clone()), Path(session_id.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Delete it
+        let response = delete_session(State(state), Path(session_id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 }

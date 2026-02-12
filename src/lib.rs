@@ -101,7 +101,7 @@ pub mod privacy;
 pub mod session;
 pub mod tee;
 
-pub use agent::{agent_router, AgentBridge, AgentLauncher, AgentSessionStore, AgentState};
+pub use agent::{agent_router, AgentEngine, AgentSessionStore, AgentState};
 pub use config::{A3sGatewayConfig, SafeClawConfig};
 pub use error::{Error, Result};
 pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};

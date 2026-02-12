@@ -3,5 +3,5 @@
 mod manager;
 mod router;
 
-pub use manager::{Session, SessionManager, SessionState};
+pub use manager::{Session, SessionManager, SessionState, TeeHandle};
 pub use router::{RoutingDecision, SessionRouter};

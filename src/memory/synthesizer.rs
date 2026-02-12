@@ -208,18 +208,8 @@ impl Synthesizer {
         artifacts
             .iter()
             .map(|a| a.sensitivity)
-            .max_by_key(|s| Self::sensitivity_rank(*s))
+            .max()
             .unwrap_or(SensitivityLevel::Normal)
-    }
-
-    /// Numeric rank for sensitivity levels (SensitivityLevel lacks Ord).
-    fn sensitivity_rank(level: SensitivityLevel) -> u8 {
-        match level {
-            SensitivityLevel::Public => 0,
-            SensitivityLevel::Normal => 1,
-            SensitivityLevel::Sensitive => 2,
-            SensitivityLevel::HighlySensitive => 3,
-        }
     }
 
     /// Return the average importance score from a slice of artifacts.

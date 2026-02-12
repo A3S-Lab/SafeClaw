@@ -8,9 +8,10 @@ import {
 	AlertDialogHeader,
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
 import { DialogProps } from "@radix-ui/react-dialog";
 import { useReactive } from "ahooks";
-import { createContext, useContext } from "react";
+import { createContext, useContext, useRef, useEffect } from "react";
 import { Button } from "../ui/button";
 import {
 	Dialog,
@@ -21,7 +22,7 @@ import {
 	DialogTitle,
 } from "../ui/dialog";
 
-type Modal = "alert" | "dialog";
+type Modal = "alert" | "dialog" | "prompt";
 
 type ModalProps = {
 	title: React.ReactNode;
@@ -32,9 +33,31 @@ type ModalProps = {
 	onConfirm?: () => void | boolean | Promise<void> | Promise<boolean>;
 };
 
+type PromptProps = {
+	title: React.ReactNode;
+	description?: React.ReactNode;
+	defaultValue?: string;
+	placeholder?: string;
+	cancelText?: React.ReactNode;
+	confirmText?: React.ReactNode;
+	onCancel?: () => void | Promise<void>;
+	onConfirm?: (value: string) => void | boolean | Promise<void> | Promise<boolean>;
+};
+
 const initialModalProps: ModalProps = {
 	title: "",
 	description: "",
+	cancelText: "取消",
+	confirmText: "确定",
+	onCancel: () => {},
+	onConfirm: () => true,
+};
+
+const initialPromptProps: PromptProps = {
+	title: "",
+	description: "",
+	defaultValue: "",
+	placeholder: "",
 	cancelText: "取消",
 	confirmText: "确定",
 	onCancel: () => {},
@@ -49,26 +72,61 @@ type ModalProviderProps = {
 type ModalProviderState = DialogProps & {
 	alert: (props: ModalProps) => void;
 	dialog: (props: ModalProps) => void;
+	prompt: (props: PromptProps) => void;
 };
 
 const initialState: ModalProviderState = {
 	open: false,
 	alert: () => {},
 	dialog: () => {},
+	prompt: () => {},
 };
 
 const ModalProviderContext = createContext<ModalProviderState>(initialState);
 
+function PromptInput({
+	defaultValue,
+	placeholder,
+	inputRef,
+}: {
+	defaultValue?: string;
+	placeholder?: string;
+	inputRef: React.RefObject<HTMLInputElement | null>;
+}) {
+	useEffect(() => {
+		// Auto-focus and select on mount
+		setTimeout(() => {
+			inputRef.current?.focus();
+			inputRef.current?.select();
+		}, 0);
+	}, [inputRef]);
+
+	return (
+		<Input
+			ref={inputRef}
+			defaultValue={defaultValue}
+			placeholder={placeholder}
+			className="mt-2"
+		/>
+	);
+}
+
 export function ModalProvider({ children, defaultType }: ModalProviderProps) {
+	const promptInputRef = useRef<HTMLInputElement | null>(null);
+
 	const state = useReactive<
 		ModalProviderState & {
 			type: Modal;
 			modalProps: ModalProps;
+			promptProps: PromptProps;
 		}
 	>({
 		open: false,
 		type: defaultType ?? "alert",
 		modalProps: {
+			title: "",
+		},
+		promptProps: {
 			title: "",
 		},
 		alert: (props: ModalProps) => {
@@ -81,6 +139,11 @@ export function ModalProvider({ children, defaultType }: ModalProviderProps) {
 			state.modalProps = { ...initialModalProps, ...props };
 			state.open = true;
 		},
+		prompt: (props: PromptProps) => {
+			state.type = "prompt";
+			state.promptProps = { ...initialPromptProps, ...props };
+			state.open = true;
+		},
 	});
 
 	return (
@@ -89,6 +152,7 @@ export function ModalProvider({ children, defaultType }: ModalProviderProps) {
 				open: state.open,
 				alert: state.alert,
 				dialog: state.dialog,
+				prompt: state.prompt,
 			}}
 		>
 			{children}
@@ -151,6 +215,48 @@ export function ModalProvider({ children, defaultType }: ModalProviderProps) {
 						</DialogFooter>
 					</DialogContent>
 				</Dialog>
+			)}
+			{state.type === "prompt" && (
+				<AlertDialog open={state.open}>
+					<AlertDialogContent>
+						<AlertDialogHeader>
+							<AlertDialogTitle>{state.promptProps.title}</AlertDialogTitle>
+							{state.promptProps?.description && (
+								<AlertDialogDescription>
+									{state.promptProps?.description}
+								</AlertDialogDescription>
+							)}
+						</AlertDialogHeader>
+						<PromptInput
+							defaultValue={state.promptProps.defaultValue}
+							placeholder={state.promptProps.placeholder}
+							inputRef={promptInputRef}
+						/>
+						<AlertDialogFooter>
+							<AlertDialogCancel
+								onClick={() => {
+									state.promptProps?.onCancel?.();
+									state.open = false;
+								}}
+							>
+								{state.promptProps?.cancelText}
+							</AlertDialogCancel>
+							<AlertDialogAction
+								onClick={async () => {
+									const value = promptInputRef.current?.value ?? "";
+									const isConfirm = await state.promptProps?.onConfirm?.(value);
+									if (typeof isConfirm === "undefined") {
+										state.open = false;
+									} else {
+										state.open = !isConfirm;
+									}
+								}}
+							>
+								{state.promptProps?.confirmText}
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</AlertDialogContent>
+				</AlertDialog>
 			)}
 		</ModalProviderContext.Provider>
 	);

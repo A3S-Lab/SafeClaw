@@ -95,7 +95,7 @@ async fn list_sessions(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse
             user_id: session.user_id.clone(),
             channel_id: session.channel_id.clone(),
             chat_id: session.chat_id.clone(),
-            uses_tee: session.uses_tee,
+            uses_tee: session.uses_tee().await,
             created_at: session.created_at,
             message_count: session.message_count().await,
         });
@@ -116,7 +116,7 @@ async fn get_session(
                 user_id: session.user_id.clone(),
                 channel_id: session.channel_id.clone(),
                 chat_id: session.chat_id.clone(),
-                uses_tee: session.uses_tee,
+                uses_tee: session.uses_tee().await,
                 created_at: session.created_at,
                 message_count: session.message_count().await,
             };

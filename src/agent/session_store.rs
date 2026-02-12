@@ -1,15 +1,14 @@
 //! Agent session persistence
 //!
-//! Stores agent session data to disk as JSON files with debounced writes.
+//! Stores agent session UI state to disk as JSON files with debounced writes.
 //! Directory layout:
 //! ```text
-//! ~/.safeclaw/agent-sessions/
-//! ├── launcher.json              // Vec<AgentProcessInfo>
+//! ~/.safeclaw/agent-sessions/ui-state/
 //! ├── <session-uuid-1>.json      // PersistedAgentSession
 //! └── <session-uuid-2>.json
 //! ```
 
-use crate::agent::types::{AgentProcessInfo, PersistedAgentSession};
+use crate::agent::types::PersistedAgentSession;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,7 +31,7 @@ impl AgentSessionStore {
         }
     }
 
-    /// Create store with default directory (~/.safeclaw/agent-sessions/)
+    /// Default directory (~/.safeclaw/agent-sessions/)
     pub fn default_dir() -> PathBuf {
         dirs_next::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -93,11 +92,13 @@ impl AgentSessionStore {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to read agent sessions directory {}: {}",
-                    self.dir.display(),
-                    e
-                );
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        "Failed to read agent sessions directory {}: {}",
+                        self.dir.display(),
+                        e
+                    );
+                }
                 return sessions;
             }
         };
@@ -105,10 +106,6 @@ impl AgentSessionStore {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            // Skip launcher.json
-            if path.file_name().and_then(|n| n.to_str()) == Some("launcher.json") {
                 continue;
             }
             if let Some(session) = Self::read_session_file(&path) {
@@ -137,30 +134,6 @@ impl AgentSessionStore {
         }
     }
 
-    /// Save launcher state (all process infos)
-    pub fn save_launcher(&self, infos: &[AgentProcessInfo]) {
-        let path = self.dir.join("launcher.json");
-        match serde_json::to_string_pretty(infos) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    tracing::warn!("Failed to write launcher.json: {}", e);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to serialize launcher state: {}", e);
-            }
-        }
-    }
-
-    /// Load launcher state
-    pub fn load_launcher(&self) -> Option<Vec<AgentProcessInfo>> {
-        let path = self.dir.join("launcher.json");
-        let data = std::fs::read_to_string(&path).ok()?;
-        serde_json::from_str(&data)
-            .map_err(|e| tracing::warn!("Failed to parse launcher.json: {}", e))
-            .ok()
-    }
-
     /// Get the file path for a session
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.dir.join(format!("{}.json", session_id))
@@ -168,6 +141,14 @@ impl AgentSessionStore {
 
     /// Write a session to disk (blocking, used internally)
     fn write_session_file(dir: &Path, session: &PersistedAgentSession) {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(
+                "Failed to create sessions directory {}: {}",
+                dir.display(),
+                e
+            );
+            return;
+        }
         let path = dir.join(format!("{}.json", session.id));
         match serde_json::to_string_pretty(session) {
             Ok(json) => {
@@ -217,23 +198,6 @@ mod tests {
         }
     }
 
-    fn make_test_process_info(id: &str) -> AgentProcessInfo {
-        use crate::agent::types::AgentProcessState;
-        AgentProcessInfo {
-            session_id: id.to_string(),
-            pid: Some(12345),
-            state: AgentProcessState::Connected,
-            exit_code: None,
-            model: Some("claude-sonnet-4-20250514".to_string()),
-            permission_mode: Some("default".to_string()),
-            cwd: "/tmp".to_string(),
-            created_at: 1700000000,
-            cli_session_id: None,
-            archived: false,
-            name: Some("Test Session".to_string()),
-        }
-    }
-
     #[test]
     fn test_save_sync_and_load() {
         let dir = TempDir::new().unwrap();
@@ -273,19 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_all_skips_launcher_json() {
-        let dir = TempDir::new().unwrap();
-        let store = AgentSessionStore::new(dir.path().to_path_buf());
-        std::fs::create_dir_all(dir.path()).unwrap();
-
-        store.save_sync(&make_test_session("s1"));
-        store.save_launcher(&[make_test_process_info("s1")]);
-
-        let all = store.load_all();
-        assert_eq!(all.len(), 1);
-    }
-
-    #[test]
     fn test_load_all_skips_corrupt_files() {
         let dir = TempDir::new().unwrap();
         let store = AgentSessionStore::new(dir.path().to_path_buf());
@@ -318,33 +269,6 @@ mod tests {
         let store = AgentSessionStore::new(dir.path().to_path_buf());
         // Should not panic
         store.remove("nonexistent").await;
-    }
-
-    #[test]
-    fn test_save_and_load_launcher() {
-        let dir = TempDir::new().unwrap();
-        let store = AgentSessionStore::new(dir.path().to_path_buf());
-        std::fs::create_dir_all(dir.path()).unwrap();
-
-        let infos = vec![
-            make_test_process_info("s1"),
-            make_test_process_info("s2"),
-        ];
-        store.save_launcher(&infos);
-
-        let loaded = store.load_launcher();
-        assert!(loaded.is_some());
-        let loaded = loaded.unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].session_id, "s1");
-        assert_eq!(loaded[1].session_id, "s2");
-    }
-
-    #[test]
-    fn test_load_launcher_returns_none_when_missing() {
-        let dir = TempDir::new().unwrap();
-        let store = AgentSessionStore::new(dir.path().to_path_buf());
-        assert!(store.load_launcher().is_none());
     }
 
     #[tokio::test]

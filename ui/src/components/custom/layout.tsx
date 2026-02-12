@@ -103,7 +103,7 @@ const Footer = React.forwardRef<
 	HTMLDivElement,
 	React.HTMLAttributes<HTMLDivElement>
 >(({ className, ...props }, ref) => {
-	// Check if Layout.Header is used within Layout
+	// Check if Layout.Footer is used within Layout
 	const contextVal = React.useContext(LayoutContext);
 	if (contextVal === null) {
 		throw new Error(`Layout.Footer must be used within ${Layout.displayName}.`);
@@ -118,7 +118,7 @@ const Footer = React.forwardRef<
 		/>
 	);
 });
-Header.displayName = "Footer";
+Footer.displayName = "Footer";
 
 Layout.Header = Header;
 Layout.Body = Body;

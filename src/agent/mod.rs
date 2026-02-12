@@ -1,27 +1,21 @@
-//! Agent module — CLI Agent process management and WebSocket bridge
+//! Agent module — in-process a3s-code agent integration
 //!
-//! This module integrates Claude Code CLI agent management into SafeClaw,
-//! providing process lifecycle management, WebSocket message bridging,
-//! and session persistence.
+//! This module integrates a3s-code's `SessionManager` directly into SafeClaw,
+//! providing in-process LLM agent execution with tool use, HITL confirmation,
+//! and streaming event translation for the browser UI.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Tauri UI (React) ←→ WS (JSON) ←→ SafeClaw Gateway (axum) ←→ WS (NDJSON) ←→ Claude Code CLI
-//!                    /ws/agent/       agent module              /ws/agent/       (--sdk-url)
-//!                    browser/:id      ├ launcher                cli/:id
-//!                                     ├ bridge
-//!                                     ├ session_store
-//!                                     └ handler
+//! UI (React) <-WS(JSON)-> handler.rs -> engine.rs -> a3s-code SessionManager (in-process)
+//!                          REST API       └── session_store.rs (UI state persistence)
 //! ```
 
-pub mod bridge;
+pub mod engine;
 pub mod handler;
-pub mod launcher;
 pub mod session_store;
 pub mod types;
 
+pub use engine::AgentEngine;
 pub use handler::{agent_router, AgentState};
-pub use launcher::AgentLauncher;
-pub use bridge::AgentBridge;
 pub use session_store::AgentSessionStore;

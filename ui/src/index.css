@@ -1,3 +1,5 @@
+@import "./assets/fonts/FiraCode/fira_code.css";
+
 @layer tailwind-base,semi,tailwind-components,tailwind-utils;
 @layer tailwind-base{
     @tailwind base;
@@ -12,75 +14,142 @@
 
 @layer base {
 	:root {
-		--background: 0 0% 100%;
-		--foreground: 224 71.4% 4.1%;
+		--font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+			Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC",
+			"Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+		--font-mono: "Fira Code", "Fira Code VF", ui-monospace, SFMono-Regular,
+			Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+		/* Fintech Light — Semi Design blue (#0064FA) + teal accent */
+		--background: 210 33% 99%;
+		--foreground: 220 50% 10%;
 		--card: 0 0% 100%;
-		--card-foreground: 224 71.4% 4.1%;
+		--card-foreground: 220 50% 10%;
 		--popover: 0 0% 100%;
-		--popover-foreground: 224 71.4% 4.1%;
-		--primary: 262.1 83.3% 57.8%;
-		--primary-foreground: 210 20% 98%;
-		--secondary: 220 14.3% 95.9%;
-		--secondary-foreground: 220.9 39.3% 11%;
-		--muted: 220 14.3% 95.9%;
-		--muted-foreground: 220 8.9% 46.1%;
-		--accent: 220 14.3% 95.9%;
-		--accent-foreground: 220.9 39.3% 11%;
-		--destructive: 0 84.2% 60.2%;
-		--destructive-foreground: 210 20% 98%;
-		--border: 220 13% 91%;
-		--input: 220 13% 91%;
-		--ring: 262.1 83.3% 57.8%;
-		--radius: 0.3rem;
-		--chart-1: 221.2 83.2% 53.3%;
-		--chart-2: 212 95% 68%;
-		--chart-3: 216 92% 60%;
-		--chart-4: 210 98% 78%;
-		--chart-5: 212 97% 87%;
-		--sidebar-background: 0 0% 98%;
-		--sidebar-foreground: 240 5.3% 26.1%;
-		--sidebar-primary: 240 5.9% 10%;
-		--sidebar-primary-foreground: 0 0% 98%;
-		--sidebar-accent: 240 4.8% 95.9%;
-		--sidebar-accent-foreground: 240 5.9% 10%;
-		--sidebar-border: 220 13% 91%;
-		--sidebar-ring: 217.2 91.2% 59.8%;
+		--popover-foreground: 220 50% 10%;
+		--primary: 216 100% 49%;
+		--primary-foreground: 0 0% 100%;
+		--secondary: 210 25% 95%;
+		--secondary-foreground: 220 40% 15%;
+		--muted: 210 20% 96%;
+		--muted-foreground: 215 16% 47%;
+		--accent: 174 62% 42%;
+		--accent-foreground: 0 0% 100%;
+		--destructive: 0 72% 51%;
+		--destructive-foreground: 0 0% 100%;
+		--border: 214 20% 90%;
+		--input: 214 20% 90%;
+		--ring: 216 100% 49%;
+		--radius: 0.5rem;
+
+		/* Charts — fintech palette */
+		--chart-1: 216 100% 49%;
+		--chart-2: 174 62% 42%;
+		--chart-3: 142 55% 45%;
+		--chart-4: 38 92% 50%;
+		--chart-5: 0 72% 51%;
+
+		/* Sidebar */
+		--sidebar-background: 220 30% 97%;
+		--sidebar-foreground: 220 40% 20%;
+		--sidebar-primary: 216 100% 49%;
+		--sidebar-primary-foreground: 0 0% 100%;
+		--sidebar-accent: 210 25% 93%;
+		--sidebar-accent-foreground: 220 40% 15%;
+		--sidebar-border: 214 20% 90%;
+		--sidebar-ring: 216 100% 49%;
+
+		/* Layout */
+		--activity-bar-width: 48px;
+		--session-list-width: 280px;
+		--header-height: 48px;
+
+		/* Chat */
+		--chat-bubble-max-width: 85%;
+		--chat-avatar-size: 32px;
+		--chat-bubble-radius: 12px;
+		--chat-bubble-user: var(--primary);
+		--chat-bubble-user-fg: var(--primary-foreground);
+		--chat-bubble-assistant: var(--muted);
+		--chat-bubble-assistant-fg: var(--foreground);
+
+		/* Avatar sizes */
+		--avatar-xs: 24px;
+		--avatar-sm: 32px;
+		--avatar-md: 40px;
+		--avatar-lg: 48px;
+		--avatar-xl: 64px;
+
+		/* Transitions */
+		--transition-fast: 150ms;
+		--transition-normal: 200ms;
+		--transition-slow: 300ms;
+
+		/* Focus */
+		--focus-ring-width: 2px;
+		--focus-ring-offset: 2px;
+		--focus-ring-color: var(--ring);
+
+		/* Brand: Moment / Market */
+		--moment-primary: 216 100% 49%;
+		--market-primary: 174 62% 42%;
+
+		/* Fintech semantic colors */
+		--success: 142 55% 45%;
+		--success-foreground: 0 0% 100%;
+		--warning: 38 92% 50%;
+		--warning-foreground: 0 0% 100%;
 	}
 
 	.dark {
-		--background: 224 71.4% 4.1%;
-		--foreground: 210 20% 98%;
-		--card: 224 71.4% 4.1%;
-		--card-foreground: 210 20% 98%;
-		--popover: 224 71.4% 4.1%;
-		--popover-foreground: 210 20% 98%;
-		--primary: 263.4 70% 50.4%;
-		--primary-foreground: 210 20% 98%;
-		--secondary: 215 27.9% 16.9%;
-		--secondary-foreground: 210 20% 98%;
-		--muted: 215 27.9% 16.9%;
-		--muted-foreground: 217.9 10.6% 64.9%;
-		--accent: 215 27.9% 16.9%;
-		--accent-foreground: 210 20% 98%;
-		--destructive: 0 62.8% 30.6%;
-		--destructive-foreground: 210 20% 98%;
-		--border: 215 27.9% 16.9%;
-		--input: 215 27.9% 16.9%;
-		--ring: 263.4 70% 50.4%;
-		--radius: 0.3rem;
-		--chart-1: 221.2 83.2% 53.3%;
-		--chart-2: 212 95% 68%;
-		--chart-3: 216 92% 60%;
-		--chart-4: 210 98% 78%;
-		--chart-5: 212 97% 87%;
-		--sidebar-background: 240 5.9% 10%;
-		--sidebar-foreground: 240 4.8% 95.9%;
-		--sidebar-primary: 224.3 76.3% 48%;
+		/* Fintech Dark — Deep navy + teal accent */
+		--background: 222 47% 6%;
+		--foreground: 210 25% 95%;
+		--card: 222 40% 8%;
+		--card-foreground: 210 25% 95%;
+		--popover: 222 40% 8%;
+		--popover-foreground: 210 25% 95%;
+		--primary: 216 100% 60%;
+		--primary-foreground: 0 0% 100%;
+		--secondary: 220 30% 14%;
+		--secondary-foreground: 210 25% 92%;
+		--muted: 220 25% 14%;
+		--muted-foreground: 215 15% 58%;
+		--accent: 174 55% 40%;
+		--accent-foreground: 0 0% 100%;
+		--destructive: 0 62% 40%;
+		--destructive-foreground: 0 0% 100%;
+		--border: 220 25% 16%;
+		--input: 220 25% 16%;
+		--ring: 216 100% 60%;
+		--radius: 0.5rem;
+
+		/* Charts — fintech palette (dark) */
+		--chart-1: 216 100% 60%;
+		--chart-2: 174 55% 48%;
+		--chart-3: 142 50% 50%;
+		--chart-4: 38 88% 55%;
+		--chart-5: 0 65% 55%;
+
+		/* Sidebar */
+		--sidebar-background: 222 45% 5%;
+		--sidebar-foreground: 210 20% 90%;
+		--sidebar-primary: 216 100% 60%;
 		--sidebar-primary-foreground: 0 0% 100%;
-		--sidebar-accent: 240 3.7% 15.9%;
-		--sidebar-accent-foreground: 240 4.8% 95.9%;
-		--sidebar-border: 240 3.7% 15.9%;
-		--sidebar-ring: 217.2 91.2% 59.8%;
+		--sidebar-accent: 220 30% 12%;
+		--sidebar-accent-foreground: 210 20% 90%;
+		--sidebar-border: 220 25% 14%;
+		--sidebar-ring: 216 100% 60%;
+
+		/* Brand: Moment / Market (dark) */
+		--moment-primary: 216 100% 64%;
+		--market-primary: 174 55% 48%;
+
+		/* Fintech semantic colors (dark) */
+		--success: 142 50% 50%;
+		--success-foreground: 0 0% 100%;
+		--warning: 38 88% 55%;
+		--warning-foreground: 0 0% 100%;
 	}
 }
 
@@ -89,10 +158,73 @@
 		@apply border-border;
 	}
 
+	html,
 	body {
-		@apply bg-accent text-accent-foreground;
+		overflow: hidden;
+		height: 100%;
+	}
+
+	html {
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
+
+	body {
+		@apply bg-background text-foreground font-sans;
 		font-feature-settings: "rlig" 1, "calt" 1;
 	}
+
+	::selection {
+		@apply bg-primary/20 text-foreground;
+	}
+
+	/* Visible focus ring — only for links and custom interactive elements */
+	a:focus-visible {
+		outline: var(--focus-ring-width) solid hsl(var(--focus-ring-color));
+		outline-offset: var(--focus-ring-offset);
+	}
+
+	/* Respect user motion preferences */
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+/* Chat bubble arrows — outside @layer to avoid purge and border-reset conflicts */
+.bubble-arrow-left,
+.bubble-arrow-right {
+	position: relative;
+}
+
+.bubble-arrow-left::before {
+	content: "";
+	position: absolute;
+	top: 10px;
+	left: -6px;
+	width: 0;
+	height: 0;
+	border: 6px solid transparent;
+	border-right-color: hsl(var(--card)) !important;
+	border-left-width: 0;
+}
+
+.bubble-arrow-right::before {
+	content: "";
+	position: absolute;
+	top: 10px;
+	right: -6px;
+	width: 0;
+	height: 0;
+	border: 6px solid transparent;
+	border-left-color: hsl(var(--primary)) !important;
+	border-right-width: 0;
 }
 
 @layer utilities {

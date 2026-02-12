@@ -101,7 +101,7 @@ impl PolicyEngine {
                 }
             }
             SensitivityLevel::Sensitive => {
-                if policy.tee_threshold as u8 <= SensitivityLevel::Sensitive as u8 {
+                if policy.tee_threshold <= SensitivityLevel::Sensitive {
                     PolicyDecision::ProcessInTee
                 } else {
                     PolicyDecision::ProcessLocal

@@ -26,6 +26,13 @@ export default defineConfig({
 	server: {
 		port: isTauri ? 1420 : 8888,
 		strictPort: isTauri,
+		proxy: isTauri ? undefined : {
+			"/api/polymarket": {
+				target: "https://gamma-api.polymarket.com",
+				pathRewrite: { "^/api/polymarket": "" },
+				changeOrigin: true,
+			},
+		},
 	},
 	plugins: [
 		pluginReact(),

@@ -25,7 +25,7 @@ export default function CodeEditor(props: EditorProps) {
 			beforeMount={handleBeforeMount}
 			options={{
 				fontSize: 16,
-				fontFamily: "FiraCode",
+				fontFamily: "'Fira Code', 'Fira Code VF', monospace",
 				fontLigatures: true,
 				wordWrap: "on",
 				minimap: {

@@ -1,4 +1,6 @@
 import { VariantProps, tv } from "tailwind-variants";
+import globalModel from "@/models/global.model";
+import { useSnapshot } from "valtio";
 
 const UserVariants = tv({
 	slots: {
@@ -44,13 +46,14 @@ export interface UserProps
 
 const User = ({ className, size, ...props }: UserProps) => {
 	const { base, avatar } = UserVariants({ className, size });
+	const { user } = useSnapshot(globalModel.state);
 
 	return (
 		<div className={base()} {...props}>
 			<div className={avatar()}>
 				<img
-					src="https://avatars.githubusercontent.com/u/19965768?v=4"
-					alt=""
+					src={user.avatar}
+					alt={user.nickname}
 					className={avatar()}
 				/>
 			</div>

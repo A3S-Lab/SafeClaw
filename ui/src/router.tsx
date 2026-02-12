@@ -13,7 +13,43 @@ const router = createHashRouter([
 			{
 				index: true,
 				lazy: async () => ({
-					Component: (await import("@/pages/home")).default,
+					Component: (await import("@/pages/agent")).default,
+				}),
+			},
+			{
+				path: "events",
+				lazy: async () => ({
+					Component: (await import("@/pages/events")).default,
+				}),
+			},
+			{
+				path: "knowledge",
+				lazy: async () => ({
+					Component: (await import("@/pages/knowledge")).default,
+				}),
+			},
+			{
+				path: "assets",
+				lazy: async () => ({
+					Component: (await import("@/pages/assets")).default,
+				}),
+			},
+			{
+				path: "systems",
+				lazy: async () => ({
+					Component: (await import("@/pages/systems")).default,
+				}),
+			},
+			{
+				path: "marketplace",
+				lazy: async () => ({
+					Component: (await import("@/pages/marketplace")).default,
+				}),
+			},
+			{
+				path: "settings",
+				lazy: async () => ({
+					Component: (await import("@/pages/settings")).default,
 				}),
 			},
 		],
