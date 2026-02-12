@@ -1,11 +1,11 @@
 # SafeClaw
 
 <p align="center">
-  <strong>Secure Personal AI Assistant with TEE Support</strong>
+  <strong>A3S Operating System — Main Application</strong>
 </p>
 
 <p align="center">
-  <em>Privacy-focused AI assistant that runs sensitive computations in hardware-isolated environments</em>
+  <em>The central application of the A3S Agent OS — proxies message channels, orchestrates multiple a3s-code agents via A3sfile, and provides hardware-isolated execution through TEE</em>
 </p>
 
 <p align="center">
@@ -239,15 +239,20 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 
 ## Features
 
+- **OS Main Application**: Runs inside a3s-box MicroVM as the central coordinator of the A3S Agent OS
+- **Multi-Agent Coordination**: In-process a3s-code library integration via `AgentEngine` — manages multiple concurrent agent sessions with independent models, permissions, and working directories
+- **A3sfile Orchestration**: Declares and orchestrates underlying a3s-code agents, models, tools, and collaboration topology (sequential/parallel/dag/hierarchical/dynamic)
+- **Multi-Channel Routing**: Proxies messages from 7 platforms (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) via a3s-gateway, routing to correct agent sessions using `user_id:channel_id:chat_id` composite keys
+- **Privacy Escalation**: Session-level sensitivity ratchet (Normal → Sensitive → HighlySensitive → Critical) with automatic TEE upgrade via `upgrade_to_tee()`
 - **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM with TEE
 - **Automatic Classification**: Detect PII, credentials, and secrets automatically
-- **Multi-Channel Support**: Telegram, Feishu (飞书), DingTalk (钉钉), WeCom (企业微信), Slack, Discord, WebChat
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Output Sanitization**: Prevent AI from leaking sensitive data in responses
 - **Session Isolation**: Strict memory isolation between users
-- **Distributed TEE**: Split sensitive tasks across multiple isolated environments
+- **Distributed TEE**: Split-Process-Merge: Coordinator TEE (local LLM) decomposes tasks, Workers process, Validator verifies no leakage
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
 - **Direct Agent Integration**: In-process a3s-code library integration via `AgentEngine`, replacing CLI subprocess bridging with native `SessionManager` calls, streaming `AgentEvent` translation, and multi-provider LLM support
+- **Desktop UI**: Tauri v2 + React + TypeScript native desktop application
 
 ## Quick Start
 
@@ -1586,15 +1591,23 @@ Continuous runtime verification and audit:
 
 ## A3S Ecosystem
 
-SafeClaw is part of the A3S ecosystem:
+SafeClaw is the **main application** of the A3S Agent Operating System:
 
-| Project | Description |
-|---------|-------------|
-| [A3S Box](https://github.com/A3S-Lab/Box) | MicroVM sandbox runtime with hardware isolation |
-| [A3S Code](https://github.com/A3S-Lab/Code) | AI coding agent with tool execution |
-| [A3S Lane](https://github.com/A3S-Lab/Lane) | Priority-based command queue |
-| [A3S Context](https://github.com/A3S-Lab/Context) | Hierarchical context management |
-| **SafeClaw** | Secure personal AI assistant with TEE support |
+```
+a3s-gateway (OS external gateway — all traffic enters here)
+    → SafeClaw (OS main application — runs inside a3s-box MicroVM)  ← You are here
+        → A3sfile (orchestrates multiple a3s-code agents + models + tools)
+            → a3s-code instances (each with a3s-lane priority queue)
+```
+
+| Project | Description | Relationship |
+|---------|-------------|--------------|
+| [A3S Gateway](https://github.com/A3S-Lab/Gateway) | OS external gateway | Sits in front of SafeClaw, normalizes 7-platform webhooks, routes traffic |
+| [A3S Box](https://github.com/A3S-Lab/Box) | MicroVM sandbox runtime | SafeClaw runs inside a3s-box for hardware isolation |
+| [A3S Code](https://github.com/A3S-Lab/Code) | AI coding agent | SafeClaw orchestrates multiple a3s-code instances in-process |
+| [A3S Lane](https://github.com/A3S-Lab/Lane) | Per-session priority queue | Each a3s-code session uses its own a3s-lane |
+| [A3S Power](https://github.com/A3S-Lab/Power) | Local LLM inference | Provides local model serving for TEE Coordinator/Validator |
+| [A3S Context](https://github.com/A3S-Lab/Context) | Hierarchical context management | Context and memory for agent sessions |
 
 ## Development
 

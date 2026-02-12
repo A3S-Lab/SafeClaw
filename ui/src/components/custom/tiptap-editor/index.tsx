@@ -8,8 +8,6 @@ import Placeholder from "@tiptap/extension-placeholder";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import {
-  BookOpen,
-  FolderClosed,
   Sparkles,
   User,
   Wrench,
@@ -49,13 +47,12 @@ const SLASH_ITEMS: SuggestionItem[] = [
   { id: "tool_read", label: "Read", description: "读取文件内容", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
   { id: "tool_write", label: "Write", description: "写入文件", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
   { id: "tool_bash", label: "Bash", description: "执行终端命令", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
-  { id: "tool_knowledge", label: "KnowledgeBase", description: "查询企业知识库", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
   { id: "tool_web_search", label: "WebSearch", description: "联网搜索", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
   { id: "tool_python", label: "PythonExec", description: "执行 Python 代码", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
   { id: "tool_sql", label: "SQLExecute", description: "执行 SQL 查询", group: "工具", icon: <Wrench className="size-3 text-muted-foreground" /> },
 ];
 
-/** Items available for @mention: agents + knowledge folders */
+/** Items available for @mention: agents */
 const MENTION_ITEMS: SuggestionItem[] = [
   // Agents
   ...BUILTIN_PERSONAS.filter((p) => p.id !== "company-group").map((p) => ({
@@ -64,32 +61,6 @@ const MENTION_ITEMS: SuggestionItem[] = [
     description: p.description,
     group: "智能体",
     icon: <User className="size-3 text-primary" />,
-  })),
-  // Knowledge folders
-  ...[
-    { id: "kb-compliance", label: "合规与风控", description: "反洗钱政策、数据隐私、监管要求" },
-    { id: "kb-product", label: "产品文档", description: "PRD、竞品分析、API 文档" },
-    { id: "kb-data", label: "数据与模型", description: "模型文档、数据字典、表结构" },
-    { id: "kb-ops", label: "运维与基础设施", description: "K8s 手册、监控配置、灾备流程" },
-    { id: "kb-finance", label: "财务与报告", description: "财务报表、资金分析、汇率对冲" },
-    { id: "kb-team", label: "团队知识沉淀", description: "入职指南、技术选型、复盘记录" },
-  ].map((k) => ({
-    ...k,
-    group: "知识库",
-    icon: <FolderClosed className="size-3 text-yellow-600 dark:text-yellow-400" />,
-  })),
-  // Projects
-  ...[
-    { id: "proj-gateway", label: "safeclaw-gateway", description: "跨境支付核心网关" },
-    { id: "proj-risk", label: "safeclaw-risk-engine", description: "实时风控引擎" },
-    { id: "proj-ui", label: "safeclaw-ui", description: "桌面客户端" },
-    { id: "proj-data", label: "safeclaw-data-platform", description: "数据平台" },
-    { id: "proj-compliance", label: "safeclaw-compliance-api", description: "合规服务 API" },
-    { id: "proj-infra", label: "safeclaw-infra", description: "基础设施即代码" },
-  ].map((p) => ({
-    ...p,
-    group: "项目",
-    icon: <BookOpen className="size-3 text-muted-foreground" />,
   })),
 ];
 

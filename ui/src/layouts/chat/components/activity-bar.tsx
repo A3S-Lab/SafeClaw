@@ -1,10 +1,6 @@
 import { cn } from "@/lib/utils";
 import {
 	Bell,
-	BookOpen,
-	Boxes,
-	Building2,
-	Globe,
 	MessageCircle,
 	Settings,
 } from "lucide-react";
@@ -17,10 +13,6 @@ const STORAGE_KEY = "safeclaw-active-route";
 const NAV_ITEMS = [
 	{ key: "chat", label: "Chat", icon: MessageCircle, path: "/" },
 	{ key: "events", label: "Events", icon: Bell, path: "/events" },
-	{ key: "knowledge", label: "Knowledge", icon: BookOpen, path: "/knowledge" },
-	{ key: "assets", label: "Assets", icon: Boxes, path: "/assets" },
-	{ key: "systems", label: "Systems", icon: Building2, path: "/systems" },
-	{ key: "marketplace", label: "Marketplace", icon: Globe, path: "/marketplace" },
 ] as const;
 
 const BOTTOM_ITEMS = [

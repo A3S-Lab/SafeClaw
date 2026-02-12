@@ -6,6 +6,8 @@ import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import ReactDOM from "react-dom/client";
 import { RouterProvider } from "react-router-dom";
+import { Agentation } from "agentation";
+import constants from "@/constants";
 import router from "./router";
 
 import "dayjs/locale/zh-cn";
@@ -23,8 +25,9 @@ if (rootEl) {
 				<TooltipProvider>
 					<RouterProvider router={router} />
 					<Toaster position="top-right" duration={3000} />
+					{constants.isDev && <Agentation />}
 				</TooltipProvider>
 			</ModalProvider>
-		</ThemeProvider>,
+		</ThemeProvider>
 	);
 }

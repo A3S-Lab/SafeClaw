@@ -23,30 +23,6 @@ const router = createHashRouter([
 				}),
 			},
 			{
-				path: "knowledge",
-				lazy: async () => ({
-					Component: (await import("@/pages/knowledge")).default,
-				}),
-			},
-			{
-				path: "assets",
-				lazy: async () => ({
-					Component: (await import("@/pages/assets")).default,
-				}),
-			},
-			{
-				path: "systems",
-				lazy: async () => ({
-					Component: (await import("@/pages/systems")).default,
-				}),
-			},
-			{
-				path: "marketplace",
-				lazy: async () => ({
-					Component: (await import("@/pages/marketplace")).default,
-				}),
-			},
-			{
 				path: "settings",
 				lazy: async () => ({
 					Component: (await import("@/pages/settings")).default,

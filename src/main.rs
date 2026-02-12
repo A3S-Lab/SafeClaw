@@ -12,7 +12,10 @@ use safeclaw::{
         GatewayConfig, ModelProviderConfig, ModelsConfig, SafeClawConfig, SlackConfig, TeeBackend,
         TeeConfig, TelegramConfig, WeComConfig, WebChatConfig,
     },
+    events::{events_router, EventStore, EventsState},
     gateway::GatewayBuilder,
+    personas::{personas_router, PersonaStore, PersonasState},
+    settings::{settings_router, SettingsState},
 };
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -181,6 +184,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build the shared settings state used by the settings HTTP router.
+fn build_settings_state(config: &SafeClawConfig, models: &ModelsConfig) -> SettingsState {
+    let resolved_keys = resolve_api_keys_from_env(models);
+    SettingsState {
+        config: std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
+        api_keys: std::sync::Arc::new(tokio::sync::RwLock::new(resolved_keys)),
+        started_at: std::time::Instant::now(),
+    }
+}
+
+/// Build the shared personas state used by the personas HTTP router.
+async fn build_personas_state() -> Result<PersonasState> {
+    let personas_dir = PersonaStore::default_dir();
+    let store = std::sync::Arc::new(
+        PersonaStore::new(personas_dir)
+            .await
+            .context("Failed to create PersonaStore")?,
+    );
+    Ok(PersonasState { store })
+}
+
+/// Build the shared events state used by the events HTTP router.
+async fn build_events_state() -> Result<EventsState> {
+    let events_dir = EventStore::default_dir();
+    let store = std::sync::Arc::new(
+        EventStore::new(events_dir)
+            .await
+            .context("Failed to create EventStore")?,
+    );
+    Ok(EventsState { store })
+}
+
 /// Build the shared agent state used by the agent HTTP/WS router.
 ///
 /// Creates an `AgentEngine` that wraps a3s-code's `SessionManager` in-process,
@@ -222,6 +257,7 @@ async fn run_gateway(
     tracing::info!("Starting SafeClaw Gateway");
 
     let models = config.models.clone();
+    let settings_config = config.clone();
 
     let gateway = GatewayBuilder::new()
         .config(config)
@@ -233,12 +269,19 @@ async fn run_gateway(
     gateway.start().await?;
 
     // Build agent router with CORS for cross-origin UI access
-    let agent_state = build_agent_state(models).await?;
+    let agent_state = build_agent_state(models.clone()).await?;
+    let events_state = build_events_state().await?;
+    let settings_state = build_settings_state(&settings_config, &models);
+    let personas_state = build_personas_state().await?;
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-    let app = agent_router(agent_state).layer(cors);
+    let app = agent_router(agent_state)
+        .merge(events_router(events_state))
+        .merge(settings_router(settings_state))
+        .merge(personas_router(personas_state))
+        .layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -288,12 +331,18 @@ async fn run_serve(
 
     // Build HTTP API router for a3s-gateway to proxy to, merged with agent router
     let agent_state = build_agent_state(config.models.clone()).await?;
+    let events_state = build_events_state().await?;
+    let settings_state = build_settings_state(&config, &config.models);
+    let personas_state = build_personas_state().await?;
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
     let app = safeclaw::gateway::ApiHandler::router(gateway.clone())
         .merge(agent_router(agent_state))
+        .merge(events_router(events_state))
+        .merge(settings_router(settings_state))
+        .merge(personas_router(personas_state))
         .layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
