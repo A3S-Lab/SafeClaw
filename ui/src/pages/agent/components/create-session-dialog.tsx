@@ -18,7 +18,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { agentApi } from "@/lib/agent-api";
-import settingsModel from "@/models/settings.model";
+import settingsModel, { resolveApiKey, resolveBaseUrl } from "@/models/settings.model";
 import { ChevronDown, Shuffle } from "lucide-react";
 import Avatar, { genConfig } from "react-nice-avatar";
 import type { AvatarFullConfig } from "react-nice-avatar";
@@ -52,13 +52,13 @@ export default function CreateSessionDialog({
   const [systemPrompt, setSystemPrompt] = useState(defaults?.systemPrompt || "");
 
   // Session config
-  const [model, setModel] = useState(defaults?.model || settingsModel.state.model);
+  const [model, setModel] = useState(defaults?.model || settingsModel.state.defaultModel);
   const [permissionMode, setPermissionMode] = useState("default");
   const [cwd, setCwd] = useState("");
 
   // Advanced
-  const [baseUrl, setBaseUrl] = useState(settingsModel.state.baseUrl);
-  const [apiKey, setApiKey] = useState(settingsModel.state.apiKey);
+  const [baseUrl, setBaseUrl] = useState(resolveBaseUrl(settingsModel.state.defaultProvider, settingsModel.state.defaultModel));
+  const [apiKey, setApiKey] = useState(resolveApiKey(settingsModel.state.defaultProvider, settingsModel.state.defaultModel));
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   // State
@@ -87,11 +87,11 @@ export default function CreateSessionDialog({
     setAvatarConfig(genConfig());
     setSessionName("");
     setSystemPrompt("");
-    setModel(settingsModel.state.model);
+    setModel(settingsModel.state.defaultModel);
     setPermissionMode("default");
     setCwd("");
-    setBaseUrl(settingsModel.state.baseUrl);
-    setApiKey(settingsModel.state.apiKey);
+    setBaseUrl(resolveBaseUrl(settingsModel.state.defaultProvider, settingsModel.state.defaultModel));
+    setApiKey(resolveApiKey(settingsModel.state.defaultProvider, settingsModel.state.defaultModel));
     setAdvancedOpen(false);
     setError(null);
   }, []);

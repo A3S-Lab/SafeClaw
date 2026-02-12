@@ -1232,22 +1232,22 @@ function SessionStatusBar({ sessionId }: { sessionId: string }) {
   const status = sessionStatus[sessionId] || "idle";
 
   const modelShort = useMemo(() => {
-    const m = settingsSnap.model;
+    const m = settingsSnap.defaultModel || "";
     if (m.includes("opus")) return "Opus";
     if (m.includes("sonnet")) return "Sonnet";
     if (m.includes("haiku")) return "Haiku";
     if (m.includes("gpt-4")) return "GPT-4o";
     if (m.includes("gpt-3")) return "GPT-3.5";
     return m.split("/").pop()?.split("-").slice(0, 2).join("-") || m;
-  }, [settingsSnap.model]);
+  }, [settingsSnap.defaultModel]);
 
   return (
     <div className="flex items-center gap-3 px-3 py-1.5 border-t bg-muted/30 text-[11px] text-muted-foreground shrink-0 select-none">
       {/* Model */}
-      <div className="flex items-center gap-1.5" title={settingsSnap.model}>
+      <div className="flex items-center gap-1.5" title={settingsSnap.defaultModel}>
         <Cpu className="size-3" />
         <span className="font-medium text-foreground/80">{modelShort}</span>
-        <span className="text-muted-foreground/60">({settingsSnap.provider})</span>
+        <span className="text-muted-foreground/60">({settingsSnap.defaultProvider})</span>
       </div>
 
       <div className="w-px h-3 bg-border" />
