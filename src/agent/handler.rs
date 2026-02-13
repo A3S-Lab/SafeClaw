@@ -377,9 +377,8 @@ mod tests {
             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
             .to_string_lossy()
             .to_string();
-        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::with_config(
+        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::new(
             cwd,
-            &code_config,
         ));
         let session_manager = Arc::new(
             a3s_code::session::SessionManager::with_persistence(None, tool_executor, dir.path())

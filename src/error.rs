@@ -49,6 +49,10 @@ pub enum Error {
     #[error("Memory error: {0}")]
     Memory(String),
 
+    /// Leakage prevention error
+    #[error("Leakage error: {0}")]
+    Leakage(String),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),

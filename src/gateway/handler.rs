@@ -27,6 +27,7 @@ impl ApiHandler {
     pub fn router(gateway: Arc<Gateway>) -> Router {
         Router::new()
             .route("/health", get(health_check))
+            .route("/.well-known/a3s-service.json", get(service_discovery))
             .route("/status", get(get_status))
             .route("/sessions", get(list_sessions))
             .route("/sessions/:id", get(get_session))
@@ -48,6 +49,12 @@ async fn health_check() -> impl IntoResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Service discovery endpoint for a3s-gateway
+async fn service_discovery() -> impl IntoResponse {
+    let descriptor = crate::gateway::integration::build_service_descriptor();
+    Json(descriptor)
 }
 
 /// Status response
@@ -190,6 +197,12 @@ mod tests {
     #[tokio::test]
     async fn test_health_check() {
         let response = health_check().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_service_discovery() {
+        let response = service_discovery().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
     }
 }

@@ -1,122 +1,12 @@
 //! TEE communication protocol
+//!
+//! Re-exports shared protocol types from a3s-transport and defines
+//! SafeClaw-specific payload structures.
+
+// Re-export shared protocol types from a3s-transport
+pub use a3s_transport::{TeeMessage, TeeRequest, TeeRequestType, TeeResponse, TeeResponseStatus};
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-/// Message types for TEE communication
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TeeMessage {
-    /// Request message
-    Request(TeeRequest),
-    /// Response message
-    Response(TeeResponse),
-    /// Heartbeat
-    Heartbeat { timestamp: i64 },
-    /// Error message
-    Error { code: i32, message: String },
-}
-
-/// Request to TEE environment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TeeRequest {
-    /// Unique request ID
-    pub id: String,
-    /// Session ID
-    pub session_id: String,
-    /// Request type
-    pub request_type: TeeRequestType,
-    /// Encrypted payload (when channel is established)
-    pub payload: Vec<u8>,
-    /// Timestamp
-    pub timestamp: i64,
-}
-
-impl TeeRequest {
-    /// Create a new request
-    pub fn new(session_id: String, request_type: TeeRequestType, payload: Vec<u8>) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            session_id,
-            request_type,
-            payload,
-            timestamp: chrono::Utc::now().timestamp_millis(),
-        }
-    }
-}
-
-/// Types of TEE requests
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeeRequestType {
-    /// Initialize a new session
-    InitSession,
-    /// Process a message with the AI agent
-    ProcessMessage,
-    /// Execute a tool
-    ExecuteTool,
-    /// Store sensitive data
-    StoreSecret,
-    /// Retrieve sensitive data
-    RetrieveSecret,
-    /// Delete sensitive data
-    DeleteSecret,
-    /// Get session state
-    GetSessionState,
-    /// Terminate session
-    TerminateSession,
-}
-
-/// Response from TEE environment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TeeResponse {
-    /// Request ID this responds to
-    pub request_id: String,
-    /// Session ID
-    pub session_id: String,
-    /// Response status
-    pub status: TeeResponseStatus,
-    /// Encrypted payload
-    pub payload: Vec<u8>,
-    /// Timestamp
-    pub timestamp: i64,
-}
-
-impl TeeResponse {
-    /// Create a success response
-    pub fn success(request_id: String, session_id: String, payload: Vec<u8>) -> Self {
-        Self {
-            request_id,
-            session_id,
-            status: TeeResponseStatus::Success,
-            payload,
-            timestamp: chrono::Utc::now().timestamp_millis(),
-        }
-    }
-
-    /// Create an error response
-    pub fn error(request_id: String, session_id: String, code: i32, message: String) -> Self {
-        Self {
-            request_id,
-            session_id,
-            status: TeeResponseStatus::Error { code, message },
-            payload: Vec::new(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
-        }
-    }
-}
-
-/// Response status
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeeResponseStatus {
-    /// Request succeeded
-    Success,
-    /// Request failed
-    Error { code: i32, message: String },
-    /// Request is pending (async operation)
-    Pending,
-}
 
 /// Payload for InitSession request
 #[allow(dead_code)]
@@ -263,5 +153,47 @@ mod tests {
         let parsed: TeeMessage = serde_json::from_str(&json).unwrap();
 
         assert!(matches!(parsed, TeeMessage::Request(_)));
+    }
+
+    #[test]
+    fn test_safeclaw_payload_serialization() {
+        let payload = InitSessionPayload {
+            user_id: "user-1".to_string(),
+            channel_id: "channel-1".to_string(),
+            model_config: ModelConfigPayload {
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                api_key_encrypted: vec![1, 2, 3],
+            },
+            options: SessionOptions {
+                enable_history: true,
+                max_history: 100,
+                enable_tools: true,
+                allowed_tools: vec!["search".to_string()],
+            },
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: InitSessionPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.user_id, "user-1");
+        assert_eq!(parsed.model_config.provider, "openai");
+    }
+
+    #[test]
+    fn test_process_message_payload_serialization() {
+        let payload = ProcessMessagePayload {
+            content: "Hello".to_string(),
+            role: "user".to_string(),
+            attachments: vec![AttachmentPayload {
+                attachment_type: "image".to_string(),
+                data: vec![1, 2, 3],
+                metadata: serde_json::json!({"size": 1024}),
+            }],
+        };
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let parsed: ProcessMessagePayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.content, "Hello");
+        assert_eq!(parsed.attachments.len(), 1);
     }
 }

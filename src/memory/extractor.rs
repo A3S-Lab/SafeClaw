@@ -64,6 +64,7 @@ impl Extractor {
             SensitivityLevel::Normal => 0.4,
             SensitivityLevel::Sensitive => 0.7,
             SensitivityLevel::HighlySensitive => 0.9,
+            SensitivityLevel::Critical => 1.0,
         }
     }
 

@@ -5,7 +5,8 @@
 
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
-use crate::tee::TeeClient;
+use crate::tee::{TeeClient, TeeMessage, TeeResponse};
+use a3s_transport::{Frame, MockTransport};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -175,12 +176,57 @@ impl Session {
         self.set_state(SessionState::Processing).await;
         self.touch().await;
 
-        let result = handle.client.process_message(&handle.tee_session_id, content).await;
+        let result = handle
+            .client
+            .process_message(&handle.tee_session_id, content)
+            .await;
 
         self.set_state(SessionState::Active).await;
 
         result
     }
+}
+
+/// Create a default mock transport for testing
+fn create_default_mock_transport() -> Box<dyn a3s_transport::Transport> {
+    Box::new(MockTransport::with_handler(|data| {
+        // Decode the frame
+        let (frame, _) = match Frame::decode(data) {
+            Ok(Some(f)) => f,
+            _ => return vec![],
+        };
+
+        // Parse the request
+        let message: TeeMessage = match serde_json::from_slice(&frame.payload) {
+            Ok(m) => m,
+            Err(_) => return vec![],
+        };
+
+        // Generate response based on request
+        let response_msg = match message {
+            TeeMessage::Request(req) => {
+                let response = TeeResponse::success(
+                    req.id.clone(),
+                    req.session_id.clone(),
+                    serde_json::to_vec(&serde_json::json!({
+                        "content": "Response from TEE environment",
+                        "status": "ok"
+                    }))
+                    .unwrap_or_default(),
+                );
+                TeeMessage::Response(response)
+            }
+            _ => TeeMessage::Error {
+                code: 400,
+                message: "Invalid message type".to_string(),
+            },
+        };
+
+        // Serialize and frame the response
+        let response_json = serde_json::to_vec(&response_msg).unwrap_or_default();
+        let response_frame = Frame::data(response_json);
+        response_frame.encode().unwrap_or_default()
+    }))
 }
 
 /// Unified session manager handling both regular and TEE sessions.
@@ -195,9 +241,24 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new session manager with TEE configuration
+    /// Create a new session manager with TEE configuration and default mock transport
     pub fn new(tee_config: TeeConfig) -> Self {
-        let tee_client = Arc::new(TeeClient::new(tee_config.clone()));
+        let transport = create_default_mock_transport();
+        let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            user_sessions: Arc::new(RwLock::new(HashMap::new())),
+            tee_config,
+            tee_client,
+        }
+    }
+
+    /// Create a new session manager with a custom transport (for testing)
+    pub fn new_with_transport(
+        tee_config: TeeConfig,
+        transport: Box<dyn a3s_transport::Transport>,
+    ) -> Self {
+        let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -552,7 +613,8 @@ mod tests {
         assert!(!session.uses_tee().await);
 
         let config = TeeConfig::default();
-        let client = Arc::new(TeeClient::new(config));
+        let transport = create_default_mock_transport();
+        let client = Arc::new(TeeClient::new(config, transport));
         let handle = TeeHandle {
             tee_session_id: "tee-001".to_string(),
             client,
@@ -576,7 +638,8 @@ mod tests {
         assert!(!session.uses_tee().await);
 
         let config = TeeConfig::default();
-        let client = Arc::new(TeeClient::new(config));
+        let transport = create_default_mock_transport();
+        let client = Arc::new(TeeClient::new(config, transport));
         let handle = TeeHandle {
             tee_session_id: "tee-002".to_string(),
             client,

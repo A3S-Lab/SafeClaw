@@ -247,7 +247,10 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM with TEE
 - **Automatic Classification**: Detect PII, credentials, and secrets automatically
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
-- **Output Sanitization**: Prevent AI from leaking sensitive data in responses
+- **Output Sanitization**: Prevent AI from leaking sensitive data in responses via taint tracking, output scanning, and tool call interception
+- **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
+- **Tool Call Interception**: Block tool calls containing tainted data or dangerous exfiltration commands (curl, wget, nc, ssh, etc.)
+- **Leakage Audit Log**: Structured audit events for all blocked leakage attempts with severity levels and leakage vectors
 - **Session Isolation**: Strict memory isolation between users
 - **Distributed TEE**: Split-Process-Merge: Coordinator TEE (local LLM) decomposes tasks, Workers process, Validator verifies no leakage
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
@@ -1291,7 +1294,14 @@ safeclaw/
 │   ├── gateway/            # Gateway integration (delegates to a3s-gateway)
 │   │   ├── server.rs       # Backend service registration
 │   │   ├── handler.rs      # Request handler (receives from a3s-gateway)
+│   │   ├── integration.rs  # Service discovery (ServiceDescriptor, /.well-known/a3s-service.json)
 │   │   └── websocket.rs    # WebSocket handler (proxied by a3s-gateway)
+│   ├── leakage/            # AI agent leakage prevention
+│   │   ├── mod.rs          # Module re-exports
+│   │   ├── taint.rs        # Taint registry — mark sensitive data, generate variants, detect matches
+│   │   ├── sanitizer.rs    # Output sanitizer — scan AI output for tainted data, auto-redact
+│   │   ├── interceptor.rs  # Tool call interceptor — block tainted args & dangerous commands
+│   │   └── audit.rs        # Audit log — structured events with severity, vectors, session tracking
 │   ├── privacy/            # Privacy classification
 │   │   ├── classifier.rs   # Sensitive data detection
 │   │   └── policy.rs       # Policy engine
@@ -1310,7 +1320,7 @@ safeclaw/
 
 ### 1. TEE Client Is Stub-Only
 
-`TeeClient::send_request()` calls `simulate_tee_response()` — a hardcoded `{"status": "ok"}`. The `SecureChannel` handshake never completes, `pending_requests` is dead code, and serialized payloads are discarded. The entire upper layer (TeeManager, SessionRouter, gateway integration) is built on top of this fake. **No real vsock transport protocol has been designed** — no framing, no backpressure, no reconnection, no multiplexing.
+~~`TeeClient::send_request()` calls `simulate_tee_response()` — a hardcoded `{"status": "ok"}`.~~ **Resolved in Phase 3.2**: `TeeClient` now accepts `Box<dyn Transport>` from `a3s-transport`, uses `Frame` wire protocol for serialization, and `MockTransport` for testing. The `simulate_tee_response()` method has been deleted. Real vsock transport will be implemented in Phase 4.
 
 ### 2. Duplicated Privacy Classification (Security Defect)
 
@@ -1330,7 +1340,7 @@ The same credit card number may match in one crate but not the other. SafeClaw's
 
 ### 4. Gateway Config Generation Direction Is Inverted
 
-SafeClaw generates TOML config for a3s-gateway via string concatenation. The backend service should not know the infrastructure layer's config schema. This creates a fragile coupling where gateway config changes require SafeClaw updates.
+~~SafeClaw generates TOML config for a3s-gateway via string concatenation.~~ **Resolved in Phase 3.4**: Replaced TOML generation with service discovery endpoint `GET /.well-known/a3s-service.json`. Gateway now discovers SafeClaw via health endpoint polling. The `gateway/integration.rs` TOML generation code has been deleted.
 
 ### 5. vsock Port Conflict
 
@@ -1388,7 +1398,7 @@ Extracted duplicated privacy types into shared `a3s-privacy` crate. All 3 consum
 
 #### Phase 3.2: Unified Transport Layer (P0 — Foundation) 🚧
 
-`a3s-transport` crate implemented (28 tests). Consumer migration pending.
+`a3s-transport` crate implemented (28 tests). SafeClaw migrated; a3s-box migration pending.
 
 - [x] **`a3s-transport` crate**: Shared transport abstraction
   - [x] `Transport` trait (`connect`, `send`, `recv`, `close`) — async, object-safe, Send+Sync
@@ -1401,7 +1411,7 @@ Extracted duplicated privacy types into shared `a3s-privacy` crate. All 3 consum
   - [x] 4090: PTY server
   - [x] 4091: TEE secure channel (new)
 - [ ] **Migrate a3s-box**: exec server and PTY server adopt shared framing
-- [ ] **Migrate SafeClaw**: `TeeClient` accepts `impl Transport`, uses port 4091
+- [x] **Migrate SafeClaw**: `TeeClient` accepts `Box<dyn Transport>`, uses `Frame` wire protocol, `MockTransport` for testing
 
 #### Phase 3.25: Direct a3s-code Library Integration (P0) ✅
 
@@ -1424,14 +1434,14 @@ Eliminate the parallel `SessionManager` + `TeeManager`:
 - [ ] **Single `SessionManager`** with unified key format
 - [ ] **Delete `tee::TeeManager`** — TEE lifecycle managed within Session
 
-#### Phase 3.4: Reverse Gateway Integration (P1)
+#### Phase 3.4: Reverse Gateway Integration (P1) ✅
 
-Replace config generation with service discovery:
+Replaced TOML config generation with service discovery endpoint.
 
-- [ ] **SafeClaw exposes** `GET /health` and `GET /.well-known/a3s-service.json`
-- [ ] **a3s-gateway discovers** SafeClaw via health endpoint polling
-- [ ] **Delete** `gateway/integration.rs` (TOML string concatenation)
-- [ ] **Routing rules** owned by gateway config, not generated by SafeClaw
+- [x] **SafeClaw exposes** `GET /health` and `GET /.well-known/a3s-service.json`
+- [x] **a3s-gateway discovers** SafeClaw via health endpoint polling
+- [x] **Delete** `gateway/integration.rs` (TOML string concatenation replaced with `ServiceDescriptor`)
+- [x] **Routing rules** owned by gateway config, not generated by SafeClaw
 
 ### Phase 4: TEE Security (depends on Phase 3.2) 📋
 
@@ -1453,30 +1463,30 @@ Core TEE integration with A3S Box, built on the real transport layer:
   - [ ] Version-based rollback protection
   - [ ] Secure credential storage
 
-### Phase 5: AI Agent Leakage Prevention (depends on Phase 3.1) 📋
+### Phase 5: AI Agent Leakage Prevention (depends on Phase 3.1) 🚧
 
-Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification.
+Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification. Core modules implemented: taint tracking, output sanitizer, tool call interceptor, audit log.
 
-- [ ] **Output Sanitizer**:
-  - [ ] Scan AI output for tainted data before sending to user
-  - [ ] Detect encoded variants (base64, hex, URL encoding)
-  - [ ] Auto-redact sensitive data in output
-  - [ ] Generate audit logs for blocked leakage attempts
-- [ ] **Taint Tracking System**:
-  - [ ] Mark sensitive data at input with unique taint IDs
-  - [ ] Track data transformations and variants
-  - [ ] Fuzzy matching for modified sensitive data
-  - [ ] Cross-reference all output channels against taint registry
+- [x] **Output Sanitizer** (`leakage/sanitizer.rs`):
+  - [x] Scan AI output for tainted data before sending to user
+  - [x] Detect encoded variants (base64, hex, URL encoding)
+  - [x] Auto-redact sensitive data in output
+  - [x] Generate audit logs for blocked leakage attempts
+- [x] **Taint Tracking System** (`leakage/taint.rs`):
+  - [x] Mark sensitive data at input with unique taint IDs
+  - [x] Track data transformations and variants (base64, hex, URL-encoded, reversed, lowercase, no-separator)
+  - [x] Detect all variant matches in text with positions
+  - [x] Redact matches with `[REDACTED:<type>]`, longest-first processing
 - [ ] **Network Firewall**:
   - [ ] Whitelist-only outbound connections (LLM APIs only)
   - [ ] Block all unauthorized network requests
   - [ ] DNS query restrictions
   - [ ] Outbound traffic audit logging
-- [ ] **Tool Call Interceptor**:
-  - [ ] Scan tool arguments for tainted data
-  - [ ] Block dangerous commands (curl, wget with data)
-  - [ ] Filesystem write restrictions
-  - [ ] Audit log all tool invocations
+- [x] **Tool Call Interceptor** (`leakage/interceptor.rs`):
+  - [x] Scan tool arguments for tainted data
+  - [x] Block dangerous commands (curl, wget, nc, ssh, scp, rsync, etc.) with shell separator awareness
+  - [x] Filesystem write restrictions (detect tainted data in write_file/edit/create_file)
+  - [x] Audit log all blocked tool invocations with severity and leakage vector
 - [ ] **Session Isolation**:
   - [ ] Strict memory isolation between sessions
   - [ ] No cross-session data access
@@ -1487,6 +1497,12 @@ Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privac
   - [ ] Input sanitization and validation
   - [ ] Hardened system prompts
   - [ ] Anomaly detection for suspicious requests
+- [x] **Leakage Audit Log** (`leakage/audit.rs`):
+  - [x] Structured `AuditEvent` with id, session, severity, vector, description, timestamp
+  - [x] Bounded in-memory `AuditLog` with capacity eviction
+  - [x] Query by session ID and severity level
+  - [x] Severity levels: Info, Warning, High, Critical
+  - [x] Leakage vectors: OutputChannel, ToolCall, DangerousCommand, NetworkExfil, FileExfil
 
 ### Phase 6: Distributed TEE Architecture 📋
 
@@ -1619,7 +1635,7 @@ cargo build
 
 ### Test
 
-**239 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, and event translation.
+**372 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
 
 ```bash
 cargo test

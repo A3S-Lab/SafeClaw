@@ -9,6 +9,6 @@ mod server;
 mod websocket;
 
 pub use handler::ApiHandler;
-pub use integration::{generate_gateway_config, generate_routing_config, GatewayRoutingConfig};
+pub use integration::{build_service_descriptor, ServiceDescriptor};
 pub use server::{Gateway, GatewayBuilder, GatewayState, GatewayStatus, ProcessedResponse};
 pub use websocket::{WebSocketHandler, WsMessage};

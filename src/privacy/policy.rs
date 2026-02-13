@@ -108,6 +108,7 @@ impl PolicyEngine {
                 }
             }
             SensitivityLevel::HighlySensitive => PolicyDecision::ProcessInTee,
+            SensitivityLevel::Critical => PolicyDecision::ProcessInTee,
         }
     }
 

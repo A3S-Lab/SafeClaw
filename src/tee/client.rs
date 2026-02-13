@@ -2,44 +2,36 @@
 
 use super::protocol::{TeeMessage, TeeRequest, TeeRequestType, TeeResponse, TeeResponseStatus};
 use crate::config::TeeConfig;
-use crate::crypto::SecureChannel;
 use crate::error::{Error, Result};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{oneshot, RwLock};
+use a3s_transport::{Frame, Transport};
+use tokio::sync::RwLock;
 
 /// Client for communicating with TEE environment
 pub struct TeeClient {
     config: TeeConfig,
-    secure_channel: Arc<SecureChannel>,
-    pending_requests: Arc<RwLock<HashMap<String, oneshot::Sender<TeeResponse>>>>,
-    connected: Arc<RwLock<bool>>,
+    transport: RwLock<Box<dyn Transport>>,
 }
 
 impl std::fmt::Debug for TeeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TeeClient")
             .field("config", &self.config)
-            .field("connected", &self.connected)
             .finish_non_exhaustive()
     }
 }
 
 impl TeeClient {
-    /// Create a new TEE client
-    pub fn new(config: TeeConfig) -> Self {
-        let channel_id = format!("tee-client-{}", uuid::Uuid::new_v4());
+    /// Create a new TEE client with a transport implementation
+    pub fn new(config: TeeConfig, transport: Box<dyn Transport>) -> Self {
         Self {
             config,
-            secure_channel: Arc::new(SecureChannel::new(channel_id)),
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            connected: Arc::new(RwLock::new(false)),
+            transport: RwLock::new(transport),
         }
     }
 
     /// Check if connected to TEE
     pub async fn is_connected(&self) -> bool {
-        *self.connected.read().await
+        self.transport.read().await.is_connected()
     }
 
     /// Connect to the TEE environment
@@ -48,30 +40,32 @@ impl TeeClient {
             return Err(Error::Tee("TEE is not enabled".to_string()));
         }
 
-        // Start handshake
-        let _handshake_init = self.secure_channel.start_handshake().await?;
+        self.transport
+            .write()
+            .await
+            .connect()
+            .await
+            .map_err(|e| Error::Tee(format!("Failed to connect to TEE: {}", e)))?;
 
-        // In a real implementation, this would:
-        // 1. Connect to the A3S Box via vsock
-        // 2. Exchange public keys
-        // 3. Complete the handshake
-
-        // For now, we simulate the connection
         tracing::info!(
-            "TEE client connecting to {}:{}",
+            "TEE client connected to {}:{}",
             self.config.box_image,
             self.config.vsock_port
         );
-
-        *self.connected.write().await = true;
 
         Ok(())
     }
 
     /// Disconnect from TEE
     pub async fn disconnect(&self) -> Result<()> {
-        self.secure_channel.close().await;
-        *self.connected.write().await = false;
+        self.transport
+            .write()
+            .await
+            .close()
+            .await
+            .map_err(|e| Error::Tee(format!("Failed to disconnect from TEE: {}", e)))?;
+
+        tracing::info!("TEE client disconnected");
         Ok(())
     }
 
@@ -81,30 +75,52 @@ impl TeeClient {
             return Err(Error::Tee("Not connected to TEE".to_string()));
         }
 
-        let request_id = request.id.clone();
-
-        // Create response channel
-        let (tx, _rx) = oneshot::channel();
-        self.pending_requests
-            .write()
-            .await
-            .insert(request_id.clone(), tx);
-
-        // Serialize and encrypt request
+        // Serialize request to JSON
         let message = TeeMessage::Request(request);
-        let _serialized = serde_json::to_vec(&message)
+        let json_bytes = serde_json::to_vec(&message)
             .map_err(|e| Error::Tee(format!("Failed to serialize request: {}", e)))?;
 
-        // In a real implementation, send via vsock
-        // For now, simulate the response
-        let response = self.simulate_tee_response(&request_id).await;
+        // Wrap in frame
+        let frame = Frame::data(json_bytes);
+        let frame_bytes = frame
+            .encode()
+            .map_err(|e| Error::Tee(format!("Failed to encode frame: {}", e)))?;
 
-        // Send response through channel
-        if let Some(tx) = self.pending_requests.write().await.remove(&request_id) {
-            let _ = tx.send(response.clone());
+        // Send via transport
+        self.transport
+            .write()
+            .await
+            .send(&frame_bytes)
+            .await
+            .map_err(|e| Error::Tee(format!("Failed to send request: {}", e)))?;
+
+        // Receive response
+        let response_bytes = self
+            .transport
+            .write()
+            .await
+            .recv()
+            .await
+            .map_err(|e| Error::Tee(format!("Failed to receive response: {}", e)))?;
+
+        // Decode frame
+        let (response_frame, _) = Frame::decode(&response_bytes)
+            .map_err(|e| Error::Tee(format!("Failed to decode response frame: {}", e)))?
+            .ok_or_else(|| Error::Tee("Incomplete frame received".to_string()))?;
+
+        // Deserialize response
+        let response_message: TeeMessage = serde_json::from_slice(&response_frame.payload)
+            .map_err(|e| Error::Tee(format!("Failed to deserialize response: {}", e)))?;
+
+        // Extract TeeResponse from TeeMessage
+        match response_message {
+            TeeMessage::Response(response) => Ok(response),
+            TeeMessage::Error { code, message } => Err(Error::Tee(format!(
+                "TEE returned error: {} (code: {})",
+                message, code
+            ))),
+            _ => Err(Error::Tee("Unexpected message type in response".to_string())),
         }
-
-        Ok(response)
     }
 
     /// Initialize a session in TEE
@@ -117,7 +133,8 @@ impl TeeClient {
         let request = TeeRequest::new(
             session_id.to_string(),
             TeeRequestType::InitSession,
-            serde_json::to_vec(&payload).unwrap_or_default(),
+            serde_json::to_vec(&payload)
+                .map_err(|e| Error::Tee(format!("Failed to serialize payload: {}", e)))?,
         );
 
         let response = self.send_request(request).await?;
@@ -142,7 +159,8 @@ impl TeeClient {
         let request = TeeRequest::new(
             session_id.to_string(),
             TeeRequestType::ProcessMessage,
-            serde_json::to_vec(&payload).unwrap_or_default(),
+            serde_json::to_vec(&payload)
+                .map_err(|e| Error::Tee(format!("Failed to serialize payload: {}", e)))?,
         );
 
         let response = self.send_request(request).await?;
@@ -171,7 +189,8 @@ impl TeeClient {
         let request = TeeRequest::new(
             session_id.to_string(),
             TeeRequestType::StoreSecret,
-            serde_json::to_vec(&payload).unwrap_or_default(),
+            serde_json::to_vec(&payload)
+                .map_err(|e| Error::Tee(format!("Failed to serialize payload: {}", e)))?,
         );
 
         let response = self.send_request(request).await?;
@@ -195,7 +214,8 @@ impl TeeClient {
         let request = TeeRequest::new(
             session_id.to_string(),
             TeeRequestType::RetrieveSecret,
-            serde_json::to_vec(&payload).unwrap_or_default(),
+            serde_json::to_vec(&payload)
+                .map_err(|e| Error::Tee(format!("Failed to serialize payload: {}", e)))?,
         );
 
         let response = self.send_request(request).await?;
@@ -235,44 +255,185 @@ impl TeeClient {
             _ => Ok(()),
         }
     }
-
-    /// Simulate TEE response (for development/testing)
-    async fn simulate_tee_response(&self, request_id: &str) -> TeeResponse {
-        // In production, this would be replaced with actual vsock communication
-        TeeResponse::success(
-            request_id.to_string(),
-            "simulated-session".to_string(),
-            serde_json::to_vec(&serde_json::json!({
-                "content": "Response from TEE environment",
-                "status": "ok"
-            }))
-            .unwrap_or_default(),
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TeeConfig;
+    use a3s_transport::MockTransport;
+
+    fn create_test_client() -> TeeClient {
+        let config = TeeConfig::default();
+        let transport = Box::new(MockTransport::with_handler(|data| {
+            // Decode the frame
+            let (frame, _) = Frame::decode(data)
+                .expect("Failed to decode frame")
+                .expect("Incomplete frame");
+
+            // Parse the request
+            let message: TeeMessage =
+                serde_json::from_slice(&frame.payload).expect("Failed to parse request");
+
+            // Generate response based on request
+            let response_msg = match message {
+                TeeMessage::Request(req) => {
+                    let response = TeeResponse::success(
+                        req.id.clone(),
+                        req.session_id.clone(),
+                        serde_json::to_vec(&serde_json::json!({
+                            "content": "Response from TEE",
+                            "status": "ok"
+                        }))
+                        .unwrap(),
+                    );
+                    TeeMessage::Response(response)
+                }
+                _ => TeeMessage::Error {
+                    code: 400,
+                    message: "Invalid message type".to_string(),
+                },
+            };
+
+            // Serialize and frame the response
+            let response_json = serde_json::to_vec(&response_msg).unwrap();
+            let response_frame = Frame::data(response_json);
+            response_frame.encode().unwrap()
+        }));
+
+        TeeClient::new(config, transport)
+    }
 
     #[tokio::test]
     async fn test_client_creation() {
-        let config = TeeConfig::default();
-        let client = TeeClient::new(config);
-
+        let client = create_test_client();
         assert!(!client.is_connected().await);
     }
 
     #[tokio::test]
     async fn test_connect_disconnect() {
-        let config = TeeConfig::default();
-        let client = TeeClient::new(config);
+        let client = create_test_client();
 
         client.connect().await.unwrap();
         assert!(client.is_connected().await);
 
         client.disconnect().await.unwrap();
         assert!(!client.is_connected().await);
+    }
+
+    #[tokio::test]
+    async fn test_send_request() {
+        let client = create_test_client();
+        client.connect().await.unwrap();
+
+        let request = TeeRequest::new(
+            "session-123".to_string(),
+            TeeRequestType::ProcessMessage,
+            vec![1, 2, 3],
+        );
+
+        let response = client.send_request(request).await.unwrap();
+        assert!(matches!(response.status, TeeResponseStatus::Success));
+    }
+
+    #[tokio::test]
+    async fn test_init_session() {
+        let client = create_test_client();
+        client.connect().await.unwrap();
+
+        let result = client.init_session("session-123", "user-456").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_message() {
+        let client = create_test_client();
+        client.connect().await.unwrap();
+
+        let result = client
+            .process_message("session-123", "Hello TEE")
+            .await
+            .unwrap();
+        assert_eq!(result, "Response from TEE");
+    }
+
+    #[tokio::test]
+    async fn test_not_connected_error() {
+        let client = create_test_client();
+
+        let request = TeeRequest::new(
+            "session-123".to_string(),
+            TeeRequestType::ProcessMessage,
+            vec![],
+        );
+
+        let result = client.send_request(request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Not connected"));
+    }
+
+    #[tokio::test]
+    async fn test_store_and_retrieve_secret() {
+        let config = TeeConfig::default();
+        let transport = Box::new(MockTransport::with_handler(|data| {
+            let (frame, _) = Frame::decode(data).expect("Failed to decode frame").unwrap();
+            let message: TeeMessage =
+                serde_json::from_slice(&frame.payload).expect("Failed to parse request");
+
+            let response_msg = match message {
+                TeeMessage::Request(req) => {
+                    let payload = match req.request_type {
+                        TeeRequestType::StoreSecret => serde_json::json!({"status": "stored"}),
+                        TeeRequestType::RetrieveSecret => {
+                            let encoded = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                b"secret_value",
+                            );
+                            serde_json::json!({"value": encoded})
+                        }
+                        _ => serde_json::json!({}),
+                    };
+
+                    let response = TeeResponse::success(
+                        req.id.clone(),
+                        req.session_id.clone(),
+                        serde_json::to_vec(&payload).unwrap(),
+                    );
+                    TeeMessage::Response(response)
+                }
+                _ => TeeMessage::Error {
+                    code: 400,
+                    message: "Invalid message type".to_string(),
+                },
+            };
+
+            let response_json = serde_json::to_vec(&response_msg).unwrap();
+            let response_frame = Frame::data(response_json);
+            response_frame.encode().unwrap()
+        }));
+
+        let client = TeeClient::new(config, transport);
+        client.connect().await.unwrap();
+
+        // Store secret
+        client
+            .store_secret("session-123", "api_key", b"secret_value")
+            .await
+            .unwrap();
+
+        // Retrieve secret
+        let retrieved = client
+            .retrieve_secret("session-123", "api_key")
+            .await
+            .unwrap();
+        assert_eq!(retrieved, b"secret_value");
+    }
+
+    #[tokio::test]
+    async fn test_terminate_session() {
+        let client = create_test_client();
+        client.connect().await.unwrap();
+
+        let result = client.terminate_session("session-123").await;
+        assert!(result.is_ok());
     }
 }

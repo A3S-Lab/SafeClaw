@@ -229,9 +229,8 @@ async fn build_agent_state(models: ModelsConfig) -> Result<AgentState> {
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
         .to_string_lossy()
         .to_string();
-    let tool_executor = std::sync::Arc::new(a3s_code::tools::ToolExecutor::with_config(
+    let tool_executor = std::sync::Arc::new(a3s_code::tools::ToolExecutor::new(
         cwd,
-        &code_config,
     ));
     let session_manager = std::sync::Arc::new(
         a3s_code::session::SessionManager::with_persistence(None, tool_executor, &sessions_dir)
@@ -352,9 +351,7 @@ async fn run_serve(
     tracing::info!(%addr, "SafeClaw backend service listening");
     tracing::info!("Waiting for traffic from a3s-gateway");
 
-    // Generate gateway config hint
-    let gw_toml = safeclaw::gateway::generate_gateway_config(&config);
-    tracing::debug!("Suggested a3s-gateway config:\n{}", gw_toml);
+    tracing::info!("Service discovery available at /.well-known/a3s-service.json");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -375,22 +372,23 @@ async fn run_serve(
 // ---------------------------------------------------------------------------
 
 fn generate_gateway_config(
-    config: &SafeClawConfig,
+    _config: &SafeClawConfig,
     output: Option<&std::path::Path>,
 ) -> Result<()> {
-    let toml = safeclaw::gateway::generate_gateway_config(config);
+    let descriptor = safeclaw::gateway::build_service_descriptor();
+    let json = serde_json::to_string_pretty(&descriptor)
+        .context("Failed to serialize service descriptor")?;
 
     if let Some(path) = output {
-        std::fs::write(path, &toml)
-            .with_context(|| format!("Failed to write gateway config to {}", path.display()))?;
-        println!("Gateway config written to: {}", path.display());
+        std::fs::write(path, &json)
+            .with_context(|| format!("Failed to write service descriptor to {}", path.display()))?;
+        println!("Service descriptor written to: {}", path.display());
     } else {
-        println!("{}", toml);
+        println!("{}", json);
     }
 
     Ok(())
 }
-
 // ---------------------------------------------------------------------------
 // send_message — POST to running gateway
 // ---------------------------------------------------------------------------
