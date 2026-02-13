@@ -26,6 +26,7 @@ a3s-code = { version = "0.3", path = "../code" }
 a3s_context = { version = "0.1", path = "../context" }
 a3s-gateway = { version = "0.1", path = "../gateway" }
 a3s-privacy = { version = "0.1", path = "../privacy" }
+a3s-event = { version = "0.1", path = "../event" }
 
 # Regex for privacy classification
 regex = "1.10"

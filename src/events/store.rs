@@ -1,32 +1,74 @@
-//! Event store with file-based JSON persistence
+//! Event store backed by a3s-event (pluggable provider)
 //!
-//! Directory layout:
-//! ```text
-//! ~/.safeclaw/events/
-//! ├── events/
-//! │   ├── evt-<uuid>.json
-//! │   └── ...
-//! └── subscriptions/
-//!     ├── <persona-id>.json
-//!     └── ...
-//! ```
+//! Uses `a3s_event::EventProvider` for event publishing and subscription
+//! management. Maintains an in-memory cache for filtering, pagination, and
+//! text search (features not natively supported by all providers).
+//!
+//! Falls back to file-based persistence when no provider is available.
 
 use crate::events::types::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// In-memory event store backed by JSON files
+/// Event store backend
+enum Backend {
+    /// Provider-backed via a3s-event (NATS, Redis, etc.)
+    Provider(Box<dyn a3s_event::EventProvider>),
+    /// File-based fallback (no provider available)
+    File {
+        events_dir: PathBuf,
+        subscriptions_dir: PathBuf,
+    },
+}
+
+/// Event store with pluggable provider backend and in-memory cache
+///
+/// The in-memory cache provides filtering, text search, and pagination
+/// on top of the provider-persisted events. Subscriptions are managed through
+/// provider durable consumers when available, or file-based persistence as fallback.
 pub struct EventStore {
-    events_dir: PathBuf,
-    subscriptions_dir: PathBuf,
+    backend: Backend,
+    /// In-memory event cache (newest first)
     events: Arc<RwLock<Vec<EventItem>>>,
+    /// In-memory subscription cache
     subscriptions: Arc<RwLock<Vec<EventSubscription>>>,
 }
 
 impl EventStore {
-    /// Create a new event store at the given base directory
+    /// Create a new event store backed by a3s-event provider
+    ///
+    /// Attempts to connect to NATS. If connection fails, falls back to
+    /// file-based persistence at the given directory.
     pub async fn new(base_dir: PathBuf) -> std::io::Result<Self> {
+        let nats_config = nats_config_from_env();
+
+        match a3s_event::NatsProvider::connect(nats_config).await {
+            Ok(provider) => {
+                tracing::info!("EventStore connected to NATS JetStream");
+                let store = Self {
+                    backend: Backend::Provider(Box::new(provider)),
+                    events: Arc::new(RwLock::new(Vec::new())),
+                    subscriptions: Arc::new(RwLock::new(Vec::new())),
+                };
+                // Load existing events from provider into cache
+                store.sync_from_provider().await;
+                // Also load any legacy file-based data
+                store.load_legacy_files(&base_dir).await;
+                Ok(store)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to connect to NATS ({}), falling back to file-based store",
+                    e
+                );
+                Self::new_file_based(base_dir).await
+            }
+        }
+    }
+
+    /// Create a file-based event store (fallback mode)
+    async fn new_file_based(base_dir: PathBuf) -> std::io::Result<Self> {
         let events_dir = base_dir.join("events");
         let subscriptions_dir = base_dir.join("subscriptions");
 
@@ -34,13 +76,15 @@ impl EventStore {
         tokio::fs::create_dir_all(&subscriptions_dir).await?;
 
         let store = Self {
-            events_dir,
-            subscriptions_dir,
+            backend: Backend::File {
+                events_dir: events_dir.clone(),
+                subscriptions_dir: subscriptions_dir.clone(),
+            },
             events: Arc::new(RwLock::new(Vec::new())),
             subscriptions: Arc::new(RwLock::new(Vec::new())),
         };
 
-        store.load_from_disk().await;
+        store.load_from_disk(&events_dir, &subscriptions_dir).await;
         Ok(store)
     }
 
@@ -50,6 +94,11 @@ impl EventStore {
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".safeclaw")
             .join("events")
+    }
+
+    /// Check if the store is using a provider backend (not file-based fallback)
+    pub fn is_provider_backed(&self) -> bool {
+        matches!(self.backend, Backend::Provider(_))
     }
 
     // =========================================================================
@@ -129,21 +178,43 @@ impl EventStore {
         let event = EventItem {
             id: format!("evt-{}", uuid::Uuid::new_v4()),
             category: req.category,
-            topic: req.topic,
-            summary: req.summary,
-            detail: req.detail,
+            topic: req.topic.clone(),
+            summary: req.summary.clone(),
+            detail: req.detail.clone(),
             timestamp: now_millis(),
-            source: req.source,
+            source: req.source.clone(),
             subscribers: req.subscribers,
             reacted: false,
             reacted_agent: None,
         };
 
-        {
-            let mut events = self.events.write().await;
-            events.push(event.clone());
+        // Publish to provider if available
+        if let Backend::Provider(ref provider) = self.backend {
+            let category_str = event.category.to_string();
+            let nats_event = a3s_event::Event::new(
+                provider.build_subject(&category_str, &req.topic),
+                &category_str,
+                &req.summary,
+                &req.source,
+                serde_json::json!({
+                    "detail": req.detail,
+                    "eventId": event.id,
+                }),
+            )
+            .with_metadata("event_id", &event.id);
+
+            if let Err(e) = provider.publish(&nats_event).await {
+                tracing::warn!(event_id = %event.id, error = %e, "Failed to publish event to provider");
+            }
         }
 
+        // Update in-memory cache
+        {
+            let mut events = self.events.write().await;
+            events.insert(0, event.clone()); // newest first
+        }
+
+        // Persist to file (fallback or backup)
         self.persist_event(&event);
         event
     }
@@ -184,6 +255,9 @@ impl EventStore {
     }
 
     /// Update subscription for a persona (upsert)
+    ///
+    /// When a provider is available, creates durable consumers for each subscribed
+    /// category so the persona receives real-time event delivery.
     pub async fn update_subscription(
         &self,
         persona_id: &str,
@@ -191,9 +265,26 @@ impl EventStore {
     ) -> EventSubscription {
         let sub = EventSubscription {
             persona_id: persona_id.to_string(),
-            categories,
+            categories: categories.clone(),
         };
 
+        // Register durable consumers via provider
+        if let Backend::Provider(ref provider) = self.backend {
+            for cat in &categories {
+                let subject = provider.category_subject(&cat.to_string());
+                let consumer_name = format!("{}-{}", persona_id, cat);
+                if let Err(e) = provider.subscribe_durable(&consumer_name, &subject).await {
+                    tracing::warn!(
+                        persona = persona_id,
+                        category = %cat,
+                        error = %e,
+                        "Failed to register durable consumer"
+                    );
+                }
+            }
+        }
+
+        // Update in-memory cache
         {
             let mut subs = self.subscriptions.write().await;
             if let Some(existing) = subs.iter_mut().find(|s| s.persona_id == persona_id) {
@@ -208,18 +299,85 @@ impl EventStore {
     }
 
     // =========================================================================
-    // Persistence
+    // NATS sync
     // =========================================================================
 
+    /// Sync events from provider into the in-memory cache
+    async fn sync_from_provider(&self) {
+        if let Backend::Provider(ref provider) = self.backend {
+            match provider.history(None, 10_000).await {
+                Ok(nats_events) => {
+                    let mut events = self.events.write().await;
+                    for ne in nats_events {
+                        // Skip if already in cache
+                        let event_id = ne
+                            .metadata
+                            .get("event_id")
+                            .cloned()
+                            .unwrap_or_else(|| ne.id.clone());
+                        if events.iter().any(|e| e.id == event_id) {
+                            continue;
+                        }
+
+                        let detail = ne
+                            .payload
+                            .get("detail")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        let item = EventItem {
+                            id: event_id,
+                            category: ne.category.parse().unwrap_or(EventCategory::System),
+                            topic: ne.subject.clone(),
+                            summary: ne.summary.clone(),
+                            detail,
+                            timestamp: ne.timestamp,
+                            source: ne.source.clone(),
+                            subscribers: vec![],
+                            reacted: false,
+                            reacted_agent: None,
+                        };
+                        events.push(item);
+                    }
+                    events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                    tracing::info!(count = events.len(), "Synced events from provider");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to sync events from provider: {}", e);
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // File-based persistence (fallback + backup)
+    // =========================================================================
+
+    /// Load legacy file-based events into cache (for migration)
+    async fn load_legacy_files(&self, base_dir: &Path) {
+        let events_dir = base_dir.join("events");
+        let subscriptions_dir = base_dir.join("subscriptions");
+        if events_dir.exists() || subscriptions_dir.exists() {
+            self.load_from_disk(&events_dir, &subscriptions_dir).await;
+        }
+    }
+
     /// Load all events and subscriptions from disk
-    async fn load_from_disk(&self) {
-        let events = Self::load_json_files::<EventItem>(&self.events_dir);
-        let subs = Self::load_json_files::<EventSubscription>(&self.subscriptions_dir);
+    async fn load_from_disk(&self, events_dir: &Path, subscriptions_dir: &Path) {
+        let file_events = Self::load_json_files::<EventItem>(events_dir);
+        let subs = Self::load_json_files::<EventSubscription>(subscriptions_dir);
 
-        let mut sorted_events = events;
-        sorted_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        {
+            let mut events = self.events.write().await;
+            for fe in file_events {
+                if !events.iter().any(|e| e.id == fe.id) {
+                    events.push(fe);
+                }
+            }
+            events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
 
-        *self.events.write().await = sorted_events;
         *self.subscriptions.write().await = subs;
     }
 
@@ -259,9 +417,13 @@ impl EventStore {
 
     /// Persist a single event to disk (fire-and-forget)
     fn persist_event(&self, event: &EventItem) {
-        let dir = self.events_dir.clone();
+        let dir = match &self.backend {
+            Backend::File { events_dir, .. } => events_dir.clone(),
+            Backend::Provider(_) => Self::default_dir().join("events"),
+        };
         let event = event.clone();
         tokio::spawn(async move {
+            let _ = tokio::fs::create_dir_all(&dir).await;
             let path = dir.join(format!("{}.json", event.id));
             match serde_json::to_string_pretty(&event) {
                 Ok(json) => {
@@ -278,9 +440,15 @@ impl EventStore {
 
     /// Persist a subscription to disk (fire-and-forget)
     fn persist_subscription(&self, sub: &EventSubscription) {
-        let dir = self.subscriptions_dir.clone();
+        let dir = match &self.backend {
+            Backend::File {
+                subscriptions_dir, ..
+            } => subscriptions_dir.clone(),
+            Backend::Provider(_) => Self::default_dir().join("subscriptions"),
+        };
         let sub = sub.clone();
         tokio::spawn(async move {
+            let _ = tokio::fs::create_dir_all(&dir).await;
             let path = dir.join(format!("{}.json", sub.persona_id));
             match serde_json::to_string_pretty(&sub) {
                 Ok(json) => {
@@ -304,6 +472,23 @@ impl EventStore {
     }
 }
 
+/// Build NATS config from environment variables
+fn nats_config_from_env() -> a3s_event::NatsConfig {
+    let mut config = a3s_event::NatsConfig::default();
+
+    if let Ok(url) = std::env::var("NATS_URL") {
+        config.url = url;
+    }
+    if let Ok(token) = std::env::var("NATS_TOKEN") {
+        config.token = Some(token);
+    }
+    if let Ok(creds) = std::env::var("NATS_CREDENTIALS") {
+        config.credentials_path = Some(creds);
+    }
+
+    config
+}
+
 /// Current time in Unix milliseconds
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -317,9 +502,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Tests use file-based fallback (no NATS server required)
     async fn make_store() -> (EventStore, TempDir) {
         let dir = TempDir::new().unwrap();
-        let store = EventStore::new(dir.path().to_path_buf()).await.unwrap();
+        let store = EventStore::new_file_based(dir.path().to_path_buf())
+            .await
+            .unwrap();
         (store, dir)
     }
 
@@ -409,7 +597,10 @@ mod tests {
             .list_events(Some(&EventCategory::Market), None, None, 1, 20)
             .await;
         assert_eq!(result.data.len(), 2);
-        assert!(result.data.iter().all(|e| e.category == EventCategory::Market));
+        assert!(result
+            .data
+            .iter()
+            .all(|e| e.category == EventCategory::Market));
     }
 
     #[tokio::test]
@@ -516,7 +707,9 @@ mod tests {
 
         // Create store, add data
         {
-            let store = EventStore::new(dir.path().to_path_buf()).await.unwrap();
+            let store = EventStore::new_file_based(dir.path().to_path_buf())
+                .await
+                .unwrap();
             store
                 .create_event(make_create_request(EventCategory::Market, "forex"))
                 .await;
@@ -529,7 +722,9 @@ mod tests {
         }
 
         // Reload from disk
-        let store = EventStore::new(dir.path().to_path_buf()).await.unwrap();
+        let store = EventStore::new_file_based(dir.path().to_path_buf())
+            .await
+            .unwrap();
         let events = store.list_events(None, None, None, 1, 20).await;
         assert_eq!(events.data.len(), 1);
         assert_eq!(events.data[0].topic, "forex");
@@ -549,8 +744,24 @@ mod tests {
         std::fs::write(events_dir.join("bad.json"), "not valid json").unwrap();
 
         // Should not panic, just skip
-        let store = EventStore::new(dir.path().to_path_buf()).await.unwrap();
+        let store = EventStore::new_file_based(dir.path().to_path_buf())
+            .await
+            .unwrap();
         let events = store.list_events(None, None, None, 1, 20).await;
         assert!(events.data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fallback_to_file_when_nats_unavailable() {
+        // With no NATS server running, new() should fall back to file-based
+        let dir = TempDir::new().unwrap();
+        let store = EventStore::new(dir.path().to_path_buf()).await.unwrap();
+        assert!(!store.is_provider_backed());
+
+        // Should still work normally
+        let event = store
+            .create_event(make_create_request(EventCategory::Market, "test"))
+            .await;
+        assert!(event.id.starts_with("evt-"));
     }
 }
