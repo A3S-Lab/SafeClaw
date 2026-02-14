@@ -28,8 +28,8 @@ a3s-gateway = { version = "0.1", path = "../gateway" }
 a3s-privacy = { version = "0.1", path = "../privacy" }
 a3s-event = { version = "0.1", path = "../event" }
 a3s-transport = { version = "0.1", path = "../transport" }
-a3s-box-runtime = { version = "0.2", path = "../box/src/runtime" }
-a3s-box-core = { version = "0.2", path = "../box/src/core" }
+a3s-box-runtime = { version = "0.2", path = "../box/src/runtime", optional = true }
+a3s-box-core = { version = "0.2", path = "../box/src/core", optional = true }
 
 # Regex for privacy classification
 regex = "1.10"
@@ -107,6 +107,10 @@ default = []
 ## Enable MockTransport fallback for testing without a real TEE MicroVM.
 ## Production builds should NOT enable this — use TeeOrchestrator + RA-TLS instead.
 mock-tee = []
+## Enable real TEE support via a3s-box MicroVM (requires libkrun).
+## Without this feature, TeeOrchestrator and RaTlsChannel are not compiled,
+## and SessionManager uses a stub orchestrator that returns errors.
+real-tee = ["dep:a3s-box-runtime", "dep:a3s-box-core"]
 
 [build-dependencies]
 tonic-build = "0.11"

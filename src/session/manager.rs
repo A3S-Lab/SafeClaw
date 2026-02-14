@@ -11,9 +11,9 @@ use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
 use crate::leakage::{InjectionDetector, InjectionVerdict, NetworkFirewall, SessionIsolation};
 use crate::tee::TeeOrchestrator;
-#[cfg(feature = "mock-tee")]
+#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
 use crate::tee::{TeeClient, TeeMessage, TeeResponse};
-#[cfg(feature = "mock-tee")]
+#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
 use a3s_transport::{Frame, MockTransport};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,9 +39,9 @@ pub enum SessionState {
 
 /// Handle to a TEE session associated with a regular session.
 ///
-/// Only available with the `mock-tee` feature for legacy TeeClient fallback.
+/// Only available with both `mock-tee` and `real-tee` features for legacy TeeClient fallback.
 /// Production code uses `TeeOrchestrator` directly via `SessionManager`.
-#[cfg(feature = "mock-tee")]
+#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
 #[derive(Debug, Clone)]
 pub struct TeeHandle {
     /// TEE-side session identifier
@@ -76,7 +76,7 @@ pub struct Session {
     /// Whether this session has been upgraded to TEE
     tee_active: Arc<RwLock<bool>>,
     /// Legacy TEE handle (mock-tee feature only)
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     tee_handle: Arc<RwLock<Option<TeeHandle>>>,
 }
 
@@ -96,7 +96,7 @@ impl Session {
             message_count: Arc::new(RwLock::new(0)),
             metadata: Arc::new(RwLock::new(HashMap::new())),
             tee_active: Arc::new(RwLock::new(false)),
-            #[cfg(feature = "mock-tee")]
+            #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
             tee_handle: Arc::new(RwLock::new(None)),
         }
     }
@@ -168,7 +168,7 @@ impl Session {
     }
 
     /// Legacy TEE upgrade with handle (mock-tee feature only).
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     pub async fn upgrade_to_tee(&self, handle: TeeHandle) {
         *self.tee_handle.write().await = Some(handle);
         *self.tee_active.write().await = true;
@@ -180,7 +180,7 @@ impl Session {
     }
 
     /// Get a clone of the legacy TEE handle, if present (mock-tee feature only).
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     pub async fn tee_handle(&self) -> Option<TeeHandle> {
         self.tee_handle.read().await.clone()
     }
@@ -189,7 +189,7 @@ impl Session {
     ///
     /// Returns an error if the session has no TEE handle.
     /// Production code should use `SessionManager::process_in_tee()` instead.
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     pub async fn process_in_tee(&self, content: &str) -> Result<String> {
         let handle = self
             .tee_handle
@@ -213,7 +213,7 @@ impl Session {
 }
 
 /// Create a default mock transport for testing (mock-tee feature only)
-#[cfg(feature = "mock-tee")]
+#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
 fn create_default_mock_transport() -> Box<dyn a3s_transport::Transport> {
     Box::new(MockTransport::with_handler(|data| {
         // Decode the frame
@@ -265,7 +265,7 @@ pub struct SessionManager {
     /// TEE orchestrator for real MicroVM lifecycle (lazy-initialized)
     orchestrator: Arc<TeeOrchestrator>,
     /// Legacy TEE client for frame-based protocol (mock-tee feature only)
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     tee_client: Arc<TeeClient>,
     /// Per-session data isolation (taint registries + audit logs)
     isolation: Arc<SessionIsolation>,
@@ -286,7 +286,7 @@ impl SessionManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
-            #[cfg(feature = "mock-tee")]
+            #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
             tee_client: {
                 let transport = create_default_mock_transport();
                 Arc::new(TeeClient::new(tee_config.clone(), transport))
@@ -300,7 +300,7 @@ impl SessionManager {
     }
 
     /// Create a new session manager with a custom transport (mock-tee feature only, for testing)
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     pub fn new_with_transport(
         tee_config: TeeConfig,
         transport: Box<dyn a3s_transport::Transport>,
@@ -350,7 +350,7 @@ impl SessionManager {
 
         for session in sessions {
             if session.uses_tee().await {
-                #[cfg(feature = "mock-tee")]
+                #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
                 if let Some(handle) = session.tee_handle().await {
                     if let Err(e) = handle.client.terminate_session(&handle.tee_session_id).await {
                         tracing::warn!(
@@ -385,7 +385,7 @@ impl SessionManager {
     }
 
     /// Get a reference to the legacy TEE client (mock-tee feature only, for testing)
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     pub fn tee_client(&self) -> &Arc<TeeClient> {
         &self.tee_client
     }
@@ -513,7 +513,7 @@ impl SessionManager {
         session.mark_tee_active().await;
 
         // Legacy: create TEE handle for mock-tee fallback path
-        #[cfg(feature = "mock-tee")]
+        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
         {
             let tee_session_id = Uuid::new_v4().to_string();
             self.tee_client
@@ -534,7 +534,7 @@ impl SessionManager {
             );
         }
 
-        #[cfg(not(feature = "mock-tee"))]
+        #[cfg(not(all(feature = "mock-tee", feature = "real-tee")))]
         tracing::info!("Upgraded session {} to TEE", session_id);
 
         Ok(())
@@ -591,12 +591,12 @@ impl SessionManager {
         }
 
         // Fallback: legacy TeeClient path (mock-tee feature only)
-        #[cfg(feature = "mock-tee")]
+        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
         {
             return session.process_in_tee(content).await;
         }
 
-        #[cfg(not(feature = "mock-tee"))]
+        #[cfg(not(all(feature = "mock-tee", feature = "real-tee")))]
         Err(Error::Tee(
             "TEE orchestrator not ready and mock-tee fallback is disabled".to_string(),
         ))
@@ -612,7 +612,7 @@ impl SessionManager {
         session.set_state(SessionState::Terminating).await;
 
         // Clean up legacy TEE handle if present (mock-tee feature only)
-        #[cfg(feature = "mock-tee")]
+        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
         if let Some(handle) = session.tee_handle().await {
             if let Err(e) = handle.client.terminate_session(&handle.tee_session_id).await {
                 tracing::warn!(
@@ -873,7 +873,7 @@ mod tests {
 
     // ---- Mock-TEE tests (require mock-tee feature) ----
 
-    #[cfg(feature = "mock-tee")]
+    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
     mod mock_tee_tests {
         use super::*;
 
