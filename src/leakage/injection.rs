@@ -232,8 +232,9 @@ impl InjectionDetector {
         }
 
         // Check for encoded payloads (base64 blocks that decode to injection patterns)
+        // Note: pass original input, not lowercased — base64 is case-sensitive.
         if self.detect_encoded {
-            if let Some(m) = self.check_encoded_payloads(&input_lower) {
+            if let Some(m) = self.check_encoded_payloads(input) {
                 matches.push(m);
             }
         }
