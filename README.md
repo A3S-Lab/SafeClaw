@@ -246,6 +246,8 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Privacy Escalation**: Session-level sensitivity ratchet (Normal → Sensitive → HighlySensitive → Critical) with automatic TEE upgrade via `upgrade_to_tee()`
 - **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM with TEE
 - **Automatic Classification**: Detect PII, credentials, and secrets automatically
+- **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
+- **Compliance Rule Engine**: Pre-built HIPAA, PCI-DSS, GDPR rule sets with custom rule support
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Output Sanitization**: Prevent AI from leaking sensitive data in responses via taint tracking, output scanning, and tool call interception
 - **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
@@ -544,16 +546,18 @@ Multi-layer approach to detect sensitive data:
 │  └──────────────────────────────────┬──────────────────────────────────┘│
 │                                     │                                    │
 │  ┌──────────────────────────────────▼──────────────────────────────────┐│
-│  │  Layer 2: Semantic Analysis (Planned)                               ││
-│  │  - Small local ML model                                             ││
-│  │  - Understands context: "my password is X" → X is sensitive         ││
-│  │  - Result: "sunshine123" → SENSITIVE (contextual password)          ││
+│  │  Layer 2: Semantic Analysis ✅                                     ││
+│  │  - Trigger-phrase context detection                                ││
+│  │  - Understands context: "my password is X" → X is sensitive       ││
+│  │  - 9 categories with Chinese language support                     ││
+│  │  - Result: "sunshine123" → SENSITIVE (contextual password)        ││
 │  └──────────────────────────────────┬──────────────────────────────────┘│
 │                                     │                                    │
 │  ┌──────────────────────────────────▼──────────────────────────────────┐│
-│  │  Layer 3: User-Defined Rules (Planned)                              ││
-│  │  - Custom patterns for enterprise compliance                        ││
-│  │  - Industry-specific rules (HIPAA, PCI-DSS, GDPR)                   ││
+│  │  Layer 3: Compliance Rules ✅                                      ││
+│  │  - Pre-built HIPAA, PCI-DSS, GDPR rule sets                       ││
+│  │  - Custom patterns for enterprise compliance                      ││
+│  │  - Per-framework TEE mandatory flags                               ││
 │  └──────────────────────────────────┬──────────────────────────────────┘│
 │                                     │                                    │
 │  Output: Classification = HIGHLY_SENSITIVE, Route to TEE               │
@@ -1304,7 +1308,9 @@ safeclaw/
 │   │   └── audit.rs        # Audit log — structured events with severity, vectors, session tracking
 │   ├── privacy/            # Privacy classification
 │   │   ├── classifier.rs   # Sensitive data detection
-│   │   └── policy.rs       # Policy engine
+│   │   ├── compliance.rs   # Compliance rule engine (HIPAA, PCI-DSS, GDPR)
+│   │   ├── policy.rs       # Policy engine
+│   │   └── semantic.rs     # Semantic PII disclosure detection
 │   ├── session/            # Session management
 │   │   ├── manager.rs      # Session lifecycle
 │   │   └── router.rs       # Privacy-based routing
@@ -1559,16 +1565,24 @@ Split-Process-Merge architecture with local LLM coordination. A3S Gateway handle
   - [ ] Timeout and retry handling
   - [ ] Audit trail for all data flows
 
-### Phase 7: Advanced Privacy 📋
+### Phase 7: Advanced Privacy 🚧
 
 Enhanced privacy classification and protection:
 
-- [ ] **Semantic Privacy Analysis**:
-  - [ ] Local ML model for context-aware detection
-  - [ ] "My password is X" pattern recognition
-- [ ] **User-Defined Rules**:
-  - [ ] Custom regex patterns
-  - [ ] Enterprise compliance rules (HIPAA, PCI-DSS, GDPR)
+- [x] **Semantic Privacy Analysis** (`privacy/semantic.rs`):
+  - [x] Trigger-phrase based context-aware PII detection ("my password is X", "my SSN is X")
+  - [x] 9 semantic categories: Password, SSN, CreditCard, ApiKey, BankAccount, DateOfBirth, Address, Medical, GenericSecret
+  - [x] Chinese language trigger phrases (密码是, 卡号是, 社会安全号, etc.)
+  - [x] Confidence scoring with validator-based boost
+  - [x] Value extraction with sentence boundary detection
+  - [x] Overlap deduplication (highest confidence wins)
+  - [x] Automatic redaction of detected values
+- [x] **Compliance Rule Engine** (`privacy/compliance.rs`):
+  - [x] Pre-built HIPAA rules: MRN, health plan ID, ICD-10 codes, DEA numbers, NPI, prescriptions
+  - [x] Pre-built PCI-DSS rules: Visa/Mastercard/Amex PANs, CVV, expiry dates, magnetic stripe track data
+  - [x] Pre-built GDPR rules: National IDs, passports, IBAN, VAT numbers, IP addresses, Article 9 special categories (ethnic, religious, biometric)
+  - [x] Custom user-defined rule support via `ComplianceEngine::add_custom_rules()`
+  - [x] Per-framework TEE mandatory flag and minimum sensitivity level
 - [ ] **Differential Privacy**:
   - [ ] Noise injection for statistical queries
   - [ ] Model memorization protection
@@ -1656,7 +1670,7 @@ cargo build
 
 ### Test
 
-**372 unit tests** covering privacy classification, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
+**489 unit tests** covering privacy classification, semantic analysis, compliance rules, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
 
 ```bash
 cargo test
