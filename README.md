@@ -248,6 +248,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Automatic Classification**: Detect PII, credentials, and secrets automatically
 - **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
 - **Compliance Rule Engine**: Pre-built HIPAA, PCI-DSS, GDPR rule sets with custom rule support
+- **Unified REST API**: 30+ endpoints with CORS, privacy/audit/compliance APIs, webhook ingestion, consistent error format
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Output Sanitization**: Prevent AI from leaking sensitive data in responses via taint tracking, output scanning, and tool call interception
 - **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
@@ -1273,6 +1274,7 @@ safeclaw/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs              # Library entry point
+│   ├── api.rs              # Unified API router (build_app, CORS, all endpoints)
 │   ├── main.rs             # CLI entry point
 │   ├── config.rs           # Configuration management (JSON, ModelsConfig → CodeConfig mapping)
 │   ├── error.rs            # Error types
@@ -1305,10 +1307,12 @@ safeclaw/
 │   │   ├── taint.rs        # Taint registry — mark sensitive data, generate variants, detect matches
 │   │   ├── sanitizer.rs    # Output sanitizer — scan AI output for tainted data, auto-redact
 │   │   ├── interceptor.rs  # Tool call interceptor — block tainted args & dangerous commands
+│   │   ├── handler.rs      # Audit REST API (events, stats)
 │   │   └── audit.rs        # Audit log — structured events with severity, vectors, session tracking
 │   ├── privacy/            # Privacy classification
 │   │   ├── classifier.rs   # Sensitive data detection
 │   │   ├── compliance.rs   # Compliance rule engine (HIPAA, PCI-DSS, GDPR)
+│   │   ├── handler.rs      # Privacy REST API (classify, analyze, scan, compliance)
 │   │   ├── policy.rs       # Policy engine
 │   │   └── semantic.rs     # Semantic PII disclosure detection
 │   ├── session/            # Session management
@@ -1670,7 +1674,7 @@ cargo build
 
 ### Test
 
-**489 unit tests** covering privacy classification, semantic analysis, compliance rules, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
+**509 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
 
 ```bash
 cargo test

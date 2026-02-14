@@ -19,6 +19,7 @@
 
 pub mod audit;
 pub mod firewall;
+pub mod handler;
 pub mod injection;
 pub mod interceptor;
 pub mod isolation;
@@ -27,6 +28,7 @@ pub mod taint;
 
 pub use audit::{AuditEvent, AuditLog, AuditSeverity, LeakageVector};
 pub use firewall::{FirewallDecision, FirewallResult, NetworkFirewall, NetworkPolicy};
+pub use handler::{audit_router, AuditState};
 pub use injection::{InjectionCategory, InjectionDetector, InjectionResult, InjectionVerdict};
 pub use interceptor::{InterceptDecision, InterceptResult, ToolInterceptor};
 pub use isolation::{SessionIsolation, WipeResult};

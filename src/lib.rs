@@ -91,6 +91,7 @@
 //! - [`config`]: Configuration management
 
 pub mod agent;
+pub mod api;
 pub mod channels;
 pub mod config;
 pub mod crypto;
@@ -106,13 +107,15 @@ pub mod settings;
 pub mod tee;
 
 pub use agent::{agent_router, AgentEngine, AgentSessionStore, AgentState};
+pub use api::build_app;
 pub use config::{A3sGatewayConfig, SafeClawConfig};
 pub use error::{Error, Result};
 pub use events::{events_router, EventStore, EventsState};
 pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};
 pub use leakage::{
-    AuditLog, InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer,
+    AuditLog, AuditState, InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer,
     SessionIsolation, TaintRegistry, ToolInterceptor,
 };
 pub use personas::{personas_router, PersonaStore, PersonasState};
+pub use privacy::{privacy_router, PrivacyState};
 pub use settings::{settings_router, SettingsState};

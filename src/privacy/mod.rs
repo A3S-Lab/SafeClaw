@@ -6,12 +6,14 @@
 //! - Semantic analysis (natural language PII disclosure)
 //! - Compliance rule engines (HIPAA, PCI-DSS, GDPR)
 
-mod classifier;
+pub mod classifier;
 pub mod compliance;
+pub mod handler;
 mod policy;
 pub mod semantic;
 
 pub use classifier::{ClassificationResult, Classifier, Match};
 pub use compliance::{ComplianceEngine, ComplianceFramework, ComplianceRuleSet};
+pub use handler::{privacy_router, PrivacyState};
 pub use policy::{DataPolicy, PolicyBuilder, PolicyDecision, PolicyEngine};
 pub use semantic::{SemanticAnalyzer, SemanticCategory, SemanticMatch};
