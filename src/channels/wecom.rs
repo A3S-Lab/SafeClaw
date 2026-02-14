@@ -1,10 +1,11 @@
 //! WeCom (WeChat Work) channel adapter
 
 use super::adapter::{AdapterBase, AdapterStatus, ChannelAdapter, ChannelEvent};
-use super::message::OutboundMessage;
+use super::message::{InboundMessage, OutboundMessage};
 use crate::config::WeComConfig;
 use crate::error::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -13,6 +14,10 @@ use tokio::sync::{mpsc, RwLock};
 pub struct WeComAdapter {
     config: WeComConfig,
     base: AdapterBase,
+    secret: Arc<RwLock<Option<String>>>,
+    token: Arc<RwLock<Option<String>>>,
+    client: reqwest::Client,
+    access_token: Arc<RwLock<Option<String>>>,
     event_tx: Arc<RwLock<Option<mpsc::Sender<ChannelEvent>>>>,
 }
 
@@ -22,8 +27,68 @@ impl WeComAdapter {
         Self {
             config,
             base: AdapterBase::new("wecom"),
+            secret: Arc::new(RwLock::new(None)),
+            token: Arc::new(RwLock::new(None)),
+            client: reqwest::Client::new(),
+            access_token: Arc::new(RwLock::new(None)),
             event_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Resolve credentials from environment variables
+    fn resolve_credentials(config: &WeComConfig) -> Result<(String, String)> {
+        let secret = std::env::var(&config.secret_ref).map_err(|_| {
+            Error::Channel(format!(
+                "Failed to resolve WeCom secret from env var: {}",
+                config.secret_ref
+            ))
+        })?;
+        let token = std::env::var(&config.token_ref).map_err(|_| {
+            Error::Channel(format!(
+                "Failed to resolve WeCom token from env var: {}",
+                config.token_ref
+            ))
+        })?;
+        Ok((secret, token))
+    }
+
+    /// Obtain access token
+    async fn get_access_token(&self) -> Result<String> {
+        if let Some(token) = self.access_token.read().await.as_ref() {
+            return Ok(token.clone());
+        }
+
+        let secret = self.secret.read().await.as_ref()
+            .ok_or_else(|| Error::Channel("WeCom secret not initialized".to_string()))?
+            .clone();
+
+        let url = format!(
+            "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={}&corpsecret={}",
+            self.config.corp_id, secret
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to get WeCom access token: {}", e)))?;
+
+        let result: WeComTokenResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to parse WeCom token response: {}", e)))?;
+
+        if result.errcode != 0 {
+            return Err(Error::Channel(format!(
+                "WeCom token API error: {}",
+                result.errmsg
+            )));
+        }
+
+        let token = result.access_token;
+        *self.access_token.write().await = Some(token.clone());
+        Ok(token)
     }
 
     /// Check if a user is allowed by userId
@@ -33,7 +98,7 @@ impl WeComAdapter {
     }
 
     /// Verify callback URL (sort token, timestamp, nonce; SHA-256 hash; compare with signature)
-    pub fn verify_callback(token: &str, timestamp: &str, nonce: &str, signature: &str) -> bool {
+    pub fn verify_callback(token: &str, timestamp: &str, nonce: &str, signature: &str) -> Result<()> {
         let mut parts = [token, timestamp, nonce];
         parts.sort();
         let combined = parts.join("");
@@ -41,7 +106,26 @@ impl WeComAdapter {
         let mut hasher = Sha256::new();
         hasher.update(combined.as_bytes());
         let result = format!("{:x}", hasher.finalize());
-        result == signature
+
+        if result != signature {
+            return Err(Error::Channel("Invalid WeCom signature".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Parse WeCom event into InboundMessage
+    pub fn parse_event(event: &WeComEvent) -> Result<InboundMessage> {
+        let mut msg = InboundMessage::new(
+            "wecom",
+            &event.from_user_name,
+            &event.from_user_name,
+            &event.content,
+        );
+        msg.channel_message_id = event.msg_id.to_string();
+        msg.timestamp = (event.create_time as i64) * 1000;
+        msg.is_dm = event.msg_type == "text";
+        Ok(msg)
     }
 }
 
@@ -54,12 +138,12 @@ impl ChannelAdapter for WeComAdapter {
     async fn start(&self, event_tx: mpsc::Sender<ChannelEvent>) -> Result<()> {
         self.base.set_status(AdapterStatus::Starting);
 
-        *self.event_tx.write().await = Some(event_tx.clone());
+        // Resolve credentials lazily
+        let (secret, token) = Self::resolve_credentials(&self.config)?;
+        *self.secret.write().await = Some(secret);
+        *self.token.write().await = Some(token);
 
-        // In a real implementation, this would:
-        // 1. Obtain access token via corp_id + corp_secret
-        // 2. Register application message callback URL
-        // 3. Start processing incoming events (decrypt AES-256-CBC with EncodingAESKey)
+        *self.event_tx.write().await = Some(event_tx.clone());
 
         tracing::info!(
             "WeCom adapter starting (corp_id={}, agent_id={})",
@@ -74,7 +158,6 @@ impl ChannelAdapter for WeComAdapter {
             .await;
 
         self.base.set_status(AdapterStatus::Running);
-
         Ok(())
     }
 
@@ -92,9 +175,7 @@ impl ChannelAdapter for WeComAdapter {
 
         *self.event_tx.write().await = None;
         self.base.set_status(AdapterStatus::Stopped);
-
         tracing::info!("WeCom adapter stopped");
-
         Ok(())
     }
 
@@ -103,18 +184,47 @@ impl ChannelAdapter for WeComAdapter {
             return Err(Error::Channel("WeCom adapter not running".to_string()));
         }
 
-        // In a real implementation, this would:
-        // 1. Format as WeCom text or markdown message
-        // 2. POST to WeCom API with access token
-        // 3. Return the msgid from response
-
         tracing::debug!(
             "Sending message to WeCom user {}: {}",
             message.chat_id,
             message.content
         );
 
-        Ok(format!("wc-msg-{}", uuid::Uuid::new_v4()))
+        let token = self.get_access_token().await?;
+        let url = format!(
+            "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={}",
+            token
+        );
+        let payload = serde_json::json!({
+            "touser": message.chat_id,
+            "msgtype": "text",
+            "agentid": self.config.agent_id,
+            "text": {
+                "content": message.content,
+            },
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to send WeCom message: {}", e)))?;
+
+        let result: WeComApiResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to parse WeCom response: {}", e)))?;
+
+        if result.errcode != 0 {
+            return Err(Error::Channel(format!(
+                "WeCom API error: {}",
+                result.errmsg
+            )));
+        }
+
+        Ok(result.msgid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
     }
 
     async fn send_typing(&self, chat_id: &str) -> Result<()> {
@@ -122,9 +232,7 @@ impl ChannelAdapter for WeComAdapter {
             return Err(Error::Channel("WeCom adapter not running".to_string()));
         }
 
-        // WeCom does not natively support typing indicators
         tracing::debug!("Typing indicator not supported for WeCom chat {}", chat_id);
-
         Ok(())
     }
 
@@ -145,6 +253,41 @@ impl ChannelAdapter for WeComAdapter {
     }
 }
 
+/// WeCom token response
+#[derive(Debug, Deserialize)]
+struct WeComTokenResponse {
+    errcode: i32,
+    errmsg: String,
+    access_token: String,
+}
+
+/// WeCom API response
+#[derive(Debug, Deserialize)]
+struct WeComApiResponse {
+    errcode: i32,
+    errmsg: String,
+    msgid: Option<String>,
+}
+
+/// WeCom event structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeComEvent {
+    #[serde(rename = "ToUserName")]
+    pub to_user_name: String,
+    #[serde(rename = "FromUserName")]
+    pub from_user_name: String,
+    #[serde(rename = "CreateTime")]
+    pub create_time: u64,
+    #[serde(rename = "MsgType")]
+    pub msg_type: String,
+    #[serde(rename = "Content")]
+    pub content: String,
+    #[serde(rename = "MsgId")]
+    pub msg_id: u64,
+    #[serde(rename = "AgentID")]
+    pub agent_id: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,9 +296,9 @@ mod tests {
         WeComConfig {
             corp_id: "ww_test_corp".to_string(),
             agent_id: 1000001,
-            secret_ref: "test_secret".to_string(),
-            encoding_aes_key_ref: "test_aes_key".to_string(),
-            token_ref: "test_token".to_string(),
+            secret_ref: "TEST_WECOM_SECRET".to_string(),
+            encoding_aes_key_ref: "TEST_WECOM_AES_KEY".to_string(),
+            token_ref: "TEST_WECOM_TOKEN".to_string(),
             allowed_users: vec!["user001".to_string(), "user002".to_string()],
             dm_policy: "pairing".to_string(),
         }
@@ -168,6 +311,19 @@ mod tests {
 
         assert_eq!(adapter.name(), "wecom");
         assert!(!adapter.is_connected());
+    }
+
+    #[test]
+    fn test_resolve_credentials_missing() {
+        let config = WeComConfig {
+            secret_ref: "NONEXISTENT_WC_SECRET".to_string(),
+            token_ref: "NONEXISTENT_WC_TOKEN".to_string(),
+            ..create_test_config()
+        };
+        let result = WeComAdapter::resolve_credentials(&config);
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Failed to resolve"));
     }
 
     #[test]
@@ -192,12 +348,11 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_callback() {
+    fn test_verify_callback_valid() {
         let token = "mytoken";
         let timestamp = "1234567890";
         let nonce = "abc123";
 
-        // Compute expected signature
         let mut parts = [token, timestamp, nonce];
         parts.sort();
         let combined = parts.join("");
@@ -205,16 +360,46 @@ mod tests {
         hasher.update(combined.as_bytes());
         let expected = format!("{:x}", hasher.finalize());
 
-        assert!(WeComAdapter::verify_callback(
-            token, timestamp, nonce, &expected
-        ));
-        assert!(!WeComAdapter::verify_callback(
-            token, timestamp, nonce, "wrong"
-        ));
+        let result = WeComAdapter::verify_callback(token, timestamp, nonce, &expected);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_callback_invalid() {
+        let token = "mytoken";
+        let timestamp = "1234567890";
+        let nonce = "abc123";
+
+        let result = WeComAdapter::verify_callback(token, timestamp, nonce, "wrong");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn test_parse_event() {
+        let event = WeComEvent {
+            to_user_name: "corp123".to_string(),
+            from_user_name: "user001".to_string(),
+            create_time: 1234567890,
+            msg_type: "text".to_string(),
+            content: "Hello WeCom!".to_string(),
+            msg_id: 123456789,
+            agent_id: 1000001,
+        };
+
+        let msg = WeComAdapter::parse_event(&event).unwrap();
+        assert_eq!(msg.channel, "wecom");
+        assert_eq!(msg.sender_id, "user001");
+        assert_eq!(msg.chat_id, "user001");
+        assert_eq!(msg.content, "Hello WeCom!");
+        assert_eq!(msg.channel_message_id, "123456789");
+        assert!(msg.is_dm);
     }
 
     #[tokio::test]
     async fn test_adapter_lifecycle() {
+        std::env::set_var("TEST_WECOM_SECRET", "test_secret");
+        std::env::set_var("TEST_WECOM_TOKEN", "test_token");
         let config = create_test_config();
         let adapter = WeComAdapter::new(config);
         let (tx, mut rx) = mpsc::channel(10);
@@ -227,5 +412,35 @@ mod tests {
 
         adapter.stop().await.unwrap();
         assert!(!adapter.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_edit_message_not_supported() {
+        std::env::set_var("TEST_WECOM_SECRET", "test_secret");
+        std::env::set_var("TEST_WECOM_TOKEN", "test_token");
+        let config = create_test_config();
+        let adapter = WeComAdapter::new(config);
+        let (tx, _rx) = mpsc::channel(10);
+
+        adapter.start(tx).await.unwrap();
+
+        let result: Result<()> = adapter.edit_message("user123", "msg123", "new content").await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_message_not_supported() {
+        std::env::set_var("TEST_WECOM_SECRET", "test_secret");
+        std::env::set_var("TEST_WECOM_TOKEN", "test_token");
+        let config = create_test_config();
+        let adapter = WeComAdapter::new(config);
+        let (tx, _rx) = mpsc::channel(10);
+
+        adapter.start(tx).await.unwrap();
+
+        let result: Result<()> = adapter.delete_message("user123", "msg123").await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("not supported"));
     }
 }

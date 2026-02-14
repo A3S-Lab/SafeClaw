@@ -1,10 +1,11 @@
 //! Discord channel adapter
 
 use super::adapter::{AdapterBase, AdapterStatus, ChannelAdapter, ChannelEvent};
-use super::message::OutboundMessage;
+use super::message::{InboundMessage, OutboundMessage};
 use crate::config::DiscordConfig;
 use crate::error::{Error, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -12,6 +13,8 @@ use tokio::sync::{mpsc, RwLock};
 pub struct DiscordAdapter {
     config: DiscordConfig,
     base: AdapterBase,
+    bot_token: Arc<RwLock<Option<String>>>,
+    client: reqwest::Client,
     event_tx: Arc<RwLock<Option<mpsc::Sender<ChannelEvent>>>>,
 }
 
@@ -21,13 +24,48 @@ impl DiscordAdapter {
         Self {
             config,
             base: AdapterBase::new("discord"),
+            bot_token: Arc::new(RwLock::new(None)),
+            client: reqwest::Client::new(),
             event_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Resolve bot token from environment variable
+    fn resolve_token(token_ref: &str) -> Result<String> {
+        std::env::var(token_ref).map_err(|_| {
+            Error::Channel(format!(
+                "Failed to resolve Discord bot token from env var: {}",
+                token_ref
+            ))
+        })
     }
 
     /// Check if a guild is allowed
     pub fn is_guild_allowed(&self, guild_id: u64) -> bool {
         self.config.allowed_guilds.is_empty() || self.config.allowed_guilds.contains(&guild_id)
+    }
+
+    /// Parse Discord message into InboundMessage
+    pub fn parse_message(msg: &DiscordMessage) -> Result<InboundMessage> {
+        let mut inbound = InboundMessage::new(
+            "discord",
+            &msg.author.id,
+            &msg.channel_id,
+            &msg.content,
+        );
+        inbound.channel_message_id = msg.id.clone();
+        inbound.sender_name = Some(msg.author.username.clone());
+        inbound.timestamp = Self::parse_discord_timestamp(&msg.timestamp)?;
+        inbound.is_dm = msg.guild_id.is_none();
+        inbound.is_mention = msg.mentions.iter().any(|u| u.bot.unwrap_or(false));
+        Ok(inbound)
+    }
+
+    /// Parse Discord timestamp (ISO 8601 format)
+    fn parse_discord_timestamp(ts: &str) -> Result<i64> {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|dt| dt.timestamp_millis())
+            .map_err(|_| Error::Channel("Failed to parse Discord timestamp".to_string()))
     }
 }
 
@@ -40,12 +78,11 @@ impl ChannelAdapter for DiscordAdapter {
     async fn start(&self, event_tx: mpsc::Sender<ChannelEvent>) -> Result<()> {
         self.base.set_status(AdapterStatus::Starting);
 
-        *self.event_tx.write().await = Some(event_tx.clone());
+        // Resolve token lazily
+        let token = Self::resolve_token(&self.config.bot_token_ref)?;
+        *self.bot_token.write().await = Some(token);
 
-        // In a real implementation, this would:
-        // 1. Connect to Discord Gateway via WebSocket
-        // 2. Authenticate with bot token
-        // 3. Start processing incoming events (MESSAGE_CREATE, etc.)
+        *self.event_tx.write().await = Some(event_tx.clone());
 
         tracing::info!("Discord adapter starting");
 
@@ -56,7 +93,6 @@ impl ChannelAdapter for DiscordAdapter {
             .await;
 
         self.base.set_status(AdapterStatus::Running);
-
         Ok(())
     }
 
@@ -74,9 +110,7 @@ impl ChannelAdapter for DiscordAdapter {
 
         *self.event_tx.write().await = None;
         self.base.set_status(AdapterStatus::Stopped);
-
         tracing::info!("Discord adapter stopped");
-
         Ok(())
     }
 
@@ -85,11 +119,9 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        // In a real implementation, this would:
-        // 1. Format as Discord embed or plain message
-        // 2. POST to channels/{channel_id}/messages API with bot token
-        // 3. Support thread/channel replies
-        // 4. Return the message ID from response
+        let bot_token = self.bot_token.read().await.as_ref()
+            .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
+            .clone();
 
         tracing::debug!(
             "Sending message to Discord channel {}: {}",
@@ -97,7 +129,39 @@ impl ChannelAdapter for DiscordAdapter {
             message.content
         );
 
-        Ok(format!("dc-msg-{}", uuid::Uuid::new_v4()))
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/messages",
+            message.chat_id
+        );
+        let payload = serde_json::json!({
+            "content": message.content,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", bot_token))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to send Discord message: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!(
+                "Discord API error {}: {}",
+                status, error_text
+            )));
+        }
+
+        let result: DiscordMessage = response
+            .json()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to parse Discord response: {}", e)))?;
+
+        Ok(result.id)
     }
 
     async fn send_typing(&self, chat_id: &str) -> Result<()> {
@@ -105,8 +169,29 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        // In a real implementation, POST to channels/{channel_id}/typing
+        let bot_token = self.bot_token.read().await.as_ref()
+            .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
+            .clone();
+
         tracing::debug!("Sending typing indicator to Discord channel {}", chat_id);
+
+        let url = format!("https://discord.com/api/v10/channels/{}/typing", chat_id);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bot {}", bot_token))
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to send Discord typing: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(Error::Channel(format!(
+                "Discord typing API error: {}",
+                status
+            )));
+        }
 
         Ok(())
     }
@@ -116,13 +201,43 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        // In a real implementation, PATCH channels/{channel_id}/messages/{message_id}
+        let bot_token = self.bot_token.read().await.as_ref()
+            .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
+            .clone();
+
         tracing::debug!(
             "Editing Discord message {} in channel {}: {}",
             message_id,
             chat_id,
             content
         );
+
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/messages/{}",
+            chat_id, message_id
+        );
+        let payload = serde_json::json!({
+            "content": content,
+        });
+
+        let response = self
+            .client
+            .patch(&url)
+            .header("Authorization", format!("Bot {}", bot_token))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to edit Discord message: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!(
+                "Discord API error {}: {}",
+                status, error_text
+            )));
+        }
 
         Ok(())
     }
@@ -132,12 +247,37 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        // In a real implementation, DELETE channels/{channel_id}/messages/{message_id}
+        let bot_token = self.bot_token.read().await.as_ref()
+            .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
+            .clone();
+
         tracing::debug!(
             "Deleting Discord message {} in channel {}",
             message_id,
             chat_id
         );
+
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/messages/{}",
+            chat_id, message_id
+        );
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bot {}", bot_token))
+            .send()
+            .await
+            .map_err(|e| Error::Channel(format!("Failed to delete Discord message: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Error::Channel(format!(
+                "Discord API error {}: {}",
+                status, error_text
+            )));
+        }
 
         Ok(())
     }
@@ -147,13 +287,33 @@ impl ChannelAdapter for DiscordAdapter {
     }
 }
 
+/// Discord message structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordMessage {
+    pub id: String,
+    pub channel_id: String,
+    pub guild_id: Option<String>,
+    pub content: String,
+    pub timestamp: String,
+    pub author: DiscordUser,
+    pub mentions: Vec<DiscordUser>,
+}
+
+/// Discord user structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordUser {
+    pub id: String,
+    pub username: String,
+    pub bot: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn create_test_config() -> DiscordConfig {
         DiscordConfig {
-            bot_token_ref: "test_bot_token".to_string(),
+            bot_token_ref: "TEST_DISCORD_BOT_TOKEN".to_string(),
             allowed_guilds: vec![123456789012345678],
             dm_policy: "pairing".to_string(),
         }
@@ -166,6 +326,14 @@ mod tests {
 
         assert_eq!(adapter.name(), "discord");
         assert!(!adapter.is_connected());
+    }
+
+    #[test]
+    fn test_resolve_token_missing() {
+        let result = DiscordAdapter::resolve_token("NONEXISTENT_DISCORD_TOKEN");
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Failed to resolve"));
     }
 
     #[test]
@@ -189,8 +357,94 @@ mod tests {
         assert!(adapter.is_guild_allowed(999999999999999999));
     }
 
+    #[test]
+    fn test_parse_message() {
+        let msg = DiscordMessage {
+            id: "123456789".to_string(),
+            channel_id: "987654321".to_string(),
+            guild_id: Some("111222333".to_string()),
+            content: "Hello Discord!".to_string(),
+            timestamp: "2024-01-01T12:00:00+00:00".to_string(),
+            author: DiscordUser {
+                id: "user123".to_string(),
+                username: "testuser".to_string(),
+                bot: Some(false),
+            },
+            mentions: vec![],
+        };
+
+        let inbound = DiscordAdapter::parse_message(&msg).unwrap();
+        assert_eq!(inbound.channel, "discord");
+        assert_eq!(inbound.sender_id, "user123");
+        assert_eq!(inbound.chat_id, "987654321");
+        assert_eq!(inbound.content, "Hello Discord!");
+        assert_eq!(inbound.channel_message_id, "123456789");
+        assert_eq!(inbound.sender_name, Some("testuser".to_string()));
+        assert!(!inbound.is_dm);
+        assert!(!inbound.is_mention);
+    }
+
+    #[test]
+    fn test_parse_message_dm() {
+        let msg = DiscordMessage {
+            id: "123456789".to_string(),
+            channel_id: "987654321".to_string(),
+            guild_id: None,
+            content: "Private message".to_string(),
+            timestamp: "2024-01-01T12:00:00+00:00".to_string(),
+            author: DiscordUser {
+                id: "user123".to_string(),
+                username: "testuser".to_string(),
+                bot: Some(false),
+            },
+            mentions: vec![],
+        };
+
+        let inbound = DiscordAdapter::parse_message(&msg).unwrap();
+        assert!(inbound.is_dm);
+    }
+
+    #[test]
+    fn test_parse_message_mention() {
+        let msg = DiscordMessage {
+            id: "123456789".to_string(),
+            channel_id: "987654321".to_string(),
+            guild_id: Some("111222333".to_string()),
+            content: "<@bot123> help".to_string(),
+            timestamp: "2024-01-01T12:00:00+00:00".to_string(),
+            author: DiscordUser {
+                id: "user123".to_string(),
+                username: "testuser".to_string(),
+                bot: Some(false),
+            },
+            mentions: vec![DiscordUser {
+                id: "bot123".to_string(),
+                username: "mybot".to_string(),
+                bot: Some(true),
+            }],
+        };
+
+        let inbound = DiscordAdapter::parse_message(&msg).unwrap();
+        assert!(inbound.is_mention);
+    }
+
+    #[test]
+    fn test_parse_discord_timestamp() {
+        let ts = "2024-01-01T12:00:00+00:00";
+        let result = DiscordAdapter::parse_discord_timestamp(ts).unwrap();
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn test_parse_discord_timestamp_invalid() {
+        let ts = "invalid";
+        let result = DiscordAdapter::parse_discord_timestamp(ts);
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_adapter_lifecycle() {
+        std::env::set_var("TEST_DISCORD_BOT_TOKEN", "test_bot_token");
         let config = create_test_config();
         let adapter = DiscordAdapter::new(config);
         let (tx, mut rx) = mpsc::channel(10);
