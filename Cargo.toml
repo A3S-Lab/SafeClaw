@@ -22,12 +22,14 @@ path = "src/main.rs"
 a3s-tools-core = { version = "0.1", path = "../tools-core" }
 a3s-lane = { version = "0.1", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
-a3s-code = { version = "0.3", path = "../code" }
+a3s-code = { version = "0.4", path = "../code" }
 a3s_context = { version = "0.1", path = "../context" }
 a3s-gateway = { version = "0.1", path = "../gateway" }
 a3s-privacy = { version = "0.1", path = "../privacy" }
 a3s-event = { version = "0.1", path = "../event" }
 a3s-transport = { version = "0.1", path = "../transport" }
+a3s-box-runtime = { version = "0.2", path = "../box/src/runtime" }
+a3s-box-core = { version = "0.2", path = "../box/src/core" }
 
 # Regex for privacy classification
 regex = "1.10"
@@ -83,6 +85,10 @@ ring = "0.17"
 aes-gcm = "0.10"
 x25519-dalek = { version = "2.0", features = ["reusable_secrets"] }
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+
+# TLS for RA-TLS channel
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
 sha2 = "0.10"
 rand = "0.8"
 

@@ -301,11 +301,49 @@ pub struct TeeConfig {
     /// CPU cores for TEE
     pub cpu_cores: u32,
 
-    /// Vsock port for communication
+    /// Vsock port for TEE secure channel
     pub vsock_port: u32,
 
     /// Attestation configuration
     pub attestation: AttestationConfig,
+
+    /// Path to a3s-box-shim binary (None = search PATH)
+    #[serde(default)]
+    pub shim_path: Option<PathBuf>,
+
+    /// Allow simulated TEE reports (development mode only)
+    #[serde(default)]
+    pub allow_simulated: bool,
+
+    /// Secrets to inject into TEE on boot
+    #[serde(default)]
+    pub secrets: Vec<SecretRef>,
+
+    /// Workspace directory to mount into VM
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
+
+    /// Socket directory for VM communication
+    #[serde(default)]
+    pub socket_dir: Option<PathBuf>,
+}
+
+/// Reference to a secret to inject into the TEE
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretRef {
+    /// Secret name (used as key inside TEE)
+    pub name: String,
+
+    /// Environment variable to read the secret value from
+    pub env_var: String,
+
+    /// Whether to also set as environment variable inside TEE
+    #[serde(default = "default_true")]
+    pub set_env: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for TeeConfig {
@@ -316,8 +354,13 @@ impl Default for TeeConfig {
             box_image: "ghcr.io/a3s-lab/safeclaw-tee:latest".to_string(),
             memory_mb: 2048,
             cpu_cores: 2,
-            vsock_port: 4089,
+            vsock_port: a3s_transport::ports::TEE_CHANNEL,
             attestation: AttestationConfig::default(),
+            shim_path: None,
+            allow_simulated: false,
+            secrets: Vec::new(),
+            workspace_dir: None,
+            socket_dir: None,
         }
     }
 }

@@ -2,10 +2,14 @@
 //!
 //! Provides a single `Session` type that optionally supports TEE processing,
 //! and a `SessionManager` that handles both regular and TEE session lifecycles.
+//!
+//! TEE processing is backed by `TeeOrchestrator` which manages the A3S Box
+//! MicroVM lifecycle and RA-TLS communication. The old `TeeClient` + `MockTransport`
+//! path is retained for testing.
 
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
-use crate::tee::{TeeClient, TeeMessage, TeeResponse};
+use crate::tee::{TeeClient, TeeMessage, TeeOrchestrator, TeeResponse};
 use a3s_transport::{Frame, MockTransport};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -236,19 +240,26 @@ pub struct SessionManager {
     user_sessions: Arc<RwLock<HashMap<String, String>>>,
     /// TEE configuration
     tee_config: TeeConfig,
-    /// TEE client for communicating with the secure environment
+    /// TEE orchestrator for real MicroVM lifecycle (lazy-initialized)
+    orchestrator: Arc<TeeOrchestrator>,
+    /// Legacy TEE client for frame-based protocol (testing/fallback)
     tee_client: Arc<TeeClient>,
 }
 
 impl SessionManager {
-    /// Create a new session manager with TEE configuration and default mock transport
+    /// Create a new session manager with TEE configuration.
+    ///
+    /// Uses `TeeOrchestrator` for real TEE communication and keeps
+    /// a `MockTransport`-backed `TeeClient` as fallback for testing.
     pub fn new(tee_config: TeeConfig) -> Self {
+        let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let transport = create_default_mock_transport();
         let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
             tee_config,
+            orchestrator,
             tee_client,
         }
     }
@@ -258,26 +269,28 @@ impl SessionManager {
         tee_config: TeeConfig,
         transport: Box<dyn a3s_transport::Transport>,
     ) -> Self {
+        let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
             tee_config,
+            orchestrator,
             tee_client,
         }
     }
 
-    /// Initialize the TEE subsystem (connect to TEE environment)
+    /// Initialize the TEE subsystem.
+    ///
+    /// With the orchestrator, this is a no-op — the VM boots lazily on first
+    /// `upgrade_to_tee()`. Kept for backward compatibility.
     pub async fn init_tee(&self) -> Result<()> {
         if !self.tee_config.enabled {
             tracing::info!("TEE is disabled, skipping initialization");
             return Ok(());
         }
 
-        tracing::info!("Initializing TEE subsystem");
-        self.tee_client.connect().await?;
-        tracing::info!("TEE subsystem initialized");
-
+        tracing::info!("TEE subsystem ready (VM will boot on first upgrade)");
         Ok(())
     }
 
@@ -310,9 +323,10 @@ impl SessionManager {
             }
         }
 
-        self.tee_client.disconnect().await?;
-        tracing::info!("TEE subsystem shutdown complete");
+        // Shutdown the MicroVM
+        self.orchestrator.shutdown().await?;
 
+        tracing::info!("TEE subsystem shutdown complete");
         Ok(())
     }
 
@@ -321,7 +335,12 @@ impl SessionManager {
         self.tee_config.enabled
     }
 
-    /// Get a reference to the TEE client
+    /// Get a reference to the TEE orchestrator
+    pub fn orchestrator(&self) -> &Arc<TeeOrchestrator> {
+        &self.orchestrator
+    }
+
+    /// Get a reference to the legacy TEE client (for testing)
     pub fn tee_client(&self) -> &Arc<TeeClient> {
         &self.tee_client
     }
@@ -394,7 +413,8 @@ impl SessionManager {
 
     /// Upgrade an existing session to use TEE processing.
     ///
-    /// Creates a TEE-side session via the TeeClient and attaches the handle.
+    /// On first call, lazily boots the MicroVM, verifies attestation via RA-TLS,
+    /// and injects configured secrets. Subsequent calls reuse the running VM.
     pub async fn upgrade_to_tee(&self, session_id: &str) -> Result<()> {
         if !self.tee_config.enabled {
             return Err(Error::Tee("TEE is not enabled".to_string()));
@@ -409,7 +429,24 @@ impl SessionManager {
             return Ok(()); // Already upgraded
         }
 
-        // Initialize TEE-side session
+        // Lazy boot: start MicroVM if not already running
+        if !self.orchestrator.is_booted().await {
+            self.orchestrator.boot().await?;
+        }
+
+        // Verify TEE attestation if not yet verified
+        if !self.orchestrator.is_ready().await {
+            self.orchestrator.verify().await?;
+
+            // Inject configured secrets after first verification
+            if !self.tee_config.secrets.is_empty() {
+                self.orchestrator
+                    .inject_secrets(&self.tee_config.secrets)
+                    .await?;
+            }
+        }
+
+        // Create TEE handle using the legacy client (for backward compat with Session.process_in_tee)
         let tee_session_id = Uuid::new_v4().to_string();
         self.tee_client
             .init_session(&tee_session_id, &session.user_id)
@@ -432,12 +469,31 @@ impl SessionManager {
     }
 
     /// Process a message in TEE for the given session.
+    ///
+    /// If the orchestrator is ready, routes through the RA-TLS channel.
+    /// Otherwise falls back to the legacy TeeClient path.
     pub async fn process_in_tee(&self, session_id: &str, content: &str) -> Result<String> {
         let session = self
             .get_session(session_id)
             .await
             .ok_or_else(|| Error::Tee(format!("Session {} not found", session_id)))?;
 
+        // Prefer orchestrator's RA-TLS channel when available
+        if self.orchestrator.is_ready().await {
+            session.set_state(SessionState::Processing).await;
+            session.touch().await;
+
+            let result = self
+                .orchestrator
+                .process_message(session_id, content)
+                .await;
+
+            session.set_state(SessionState::Active).await;
+
+            return result.map(|r| r.content);
+        }
+
+        // Fallback: legacy TeeClient path
         session.process_in_tee(content).await
     }
 
