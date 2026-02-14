@@ -326,6 +326,10 @@ pub struct TeeConfig {
     /// Socket directory for VM communication
     #[serde(default)]
     pub socket_dir: Option<PathBuf>,
+
+    /// Network firewall policy for outbound connections
+    #[serde(default)]
+    pub network_policy: crate::leakage::NetworkPolicy,
 }
 
 /// Reference to a secret to inject into the TEE
@@ -361,6 +365,7 @@ impl Default for TeeConfig {
             secrets: Vec::new(),
             workspace_dir: None,
             socket_dir: None,
+            network_policy: crate::leakage::NetworkPolicy::default(),
         }
     }
 }

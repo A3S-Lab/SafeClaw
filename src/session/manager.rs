@@ -9,6 +9,7 @@
 
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
+use crate::leakage::{InjectionDetector, InjectionVerdict, NetworkFirewall, SessionIsolation};
 use crate::tee::{TeeClient, TeeMessage, TeeOrchestrator, TeeResponse};
 use a3s_transport::{Frame, MockTransport};
 use std::collections::HashMap;
@@ -244,6 +245,12 @@ pub struct SessionManager {
     orchestrator: Arc<TeeOrchestrator>,
     /// Legacy TEE client for frame-based protocol (testing/fallback)
     tee_client: Arc<TeeClient>,
+    /// Per-session data isolation (taint registries + audit logs)
+    isolation: Arc<SessionIsolation>,
+    /// Prompt injection detector
+    injection_detector: Arc<InjectionDetector>,
+    /// Network firewall for outbound connection control
+    network_firewall: Arc<NetworkFirewall>,
 }
 
 impl SessionManager {
@@ -255,12 +262,16 @@ impl SessionManager {
         let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let transport = create_default_mock_transport();
         let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
+        let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
             tee_config,
             orchestrator,
             tee_client,
+            isolation: Arc::new(SessionIsolation::default()),
+            injection_detector: Arc::new(InjectionDetector::new()),
+            network_firewall,
         }
     }
 
@@ -271,12 +282,16 @@ impl SessionManager {
     ) -> Self {
         let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
+        let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
             tee_config,
             orchestrator,
             tee_client,
+            isolation: Arc::new(SessionIsolation::default()),
+            injection_detector: Arc::new(InjectionDetector::new()),
+            network_firewall,
         }
     }
 
@@ -326,6 +341,9 @@ impl SessionManager {
         // Shutdown the MicroVM
         self.orchestrator.shutdown().await?;
 
+        // Wipe all session isolation data
+        self.isolation.wipe_all().await;
+
         tracing::info!("TEE subsystem shutdown complete");
         Ok(())
     }
@@ -343,6 +361,21 @@ impl SessionManager {
     /// Get a reference to the legacy TEE client (for testing)
     pub fn tee_client(&self) -> &Arc<TeeClient> {
         &self.tee_client
+    }
+
+    /// Get a reference to the session isolation manager
+    pub fn isolation(&self) -> &Arc<SessionIsolation> {
+        &self.isolation
+    }
+
+    /// Get a reference to the injection detector
+    pub fn injection_detector(&self) -> &Arc<InjectionDetector> {
+        &self.injection_detector
+    }
+
+    /// Get a reference to the network firewall
+    pub fn network_firewall(&self) -> &Arc<NetworkFirewall> {
+        &self.network_firewall
     }
 
     /// Create a new session
@@ -372,6 +405,9 @@ impl SessionManager {
         let session_id = session.id.clone();
 
         session.set_state(SessionState::Active).await;
+
+        // Initialize per-session isolation (taint registry + audit log)
+        self.isolation.init_session(&session.id).await;
 
         // Store session
         self.sessions
@@ -470,13 +506,38 @@ impl SessionManager {
 
     /// Process a message in TEE for the given session.
     ///
-    /// If the orchestrator is ready, routes through the RA-TLS channel.
-    /// Otherwise falls back to the legacy TeeClient path.
+    /// Scans input for prompt injection before forwarding. If the orchestrator
+    /// is ready, routes through the RA-TLS channel. Otherwise falls back to
+    /// the legacy TeeClient path.
     pub async fn process_in_tee(&self, session_id: &str, content: &str) -> Result<String> {
         let session = self
             .get_session(session_id)
             .await
             .ok_or_else(|| Error::Tee(format!("Session {} not found", session_id)))?;
+
+        // Prompt injection defense: scan input before forwarding
+        let injection_result = self.injection_detector.scan(content, session_id);
+        if injection_result.verdict == InjectionVerdict::Blocked {
+            // Record audit events in session-scoped log
+            if let Some(guard) = self.isolation.audit_log(session_id).await {
+                guard
+                    .write(|log| log.record_all(injection_result.audit_events))
+                    .await;
+            }
+            return Err(Error::Tee(format!(
+                "Prompt injection blocked: {} pattern(s) detected",
+                injection_result.matches.len()
+            )));
+        }
+
+        // Record suspicious patterns (warn but allow)
+        if injection_result.verdict == InjectionVerdict::Suspicious {
+            if let Some(guard) = self.isolation.audit_log(session_id).await {
+                guard
+                    .write(|log| log.record_all(injection_result.audit_events))
+                    .await;
+            }
+        }
 
         // Prefer orchestrator's RA-TLS channel when available
         if self.orchestrator.is_ready().await {
@@ -524,6 +585,12 @@ impl SessionManager {
             session.user_id, session.channel_id, session.chat_id
         );
         self.user_sessions.write().await.remove(&user_key);
+
+        // Securely wipe session-scoped taint data and audit log
+        let wipe = self.isolation.wipe_session(session_id).await;
+        if !wipe.verified {
+            tracing::error!(session_id = session_id, "Session wipe verification failed");
+        }
 
         session.set_state(SessionState::Terminated).await;
 

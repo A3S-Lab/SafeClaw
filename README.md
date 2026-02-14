@@ -1482,9 +1482,9 @@ Central coordinator for TEE lifecycle — boots MicroVM, verifies attestation, i
 - [ ] **Feature flag `tee-real`**: Toggle between real TEE and mock fallback
 - [ ] **Deprecate `MockTransport`** in production code (keep in tests only)
 
-### Phase 5: AI Agent Leakage Prevention (depends on Phase 3.1) 🚧
+### Phase 5: AI Agent Leakage Prevention (depends on Phase 3.1) ✅
 
-Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification. Core modules implemented: taint tracking, output sanitizer, tool call interceptor, audit log.
+Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification. All modules implemented: taint tracking, output sanitizer, tool call interceptor, audit log, network firewall, session isolation, prompt injection defense.
 
 - [x] **Output Sanitizer** (`leakage/sanitizer.rs`):
   - [x] Scan AI output for tainted data before sending to user
@@ -1496,26 +1496,28 @@ Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privac
   - [x] Track data transformations and variants (base64, hex, URL-encoded, reversed, lowercase, no-separator)
   - [x] Detect all variant matches in text with positions
   - [x] Redact matches with `[REDACTED:<type>]`, longest-first processing
-- [ ] **Network Firewall**:
-  - [ ] Whitelist-only outbound connections (LLM APIs only)
-  - [ ] Block all unauthorized network requests
-  - [ ] DNS query restrictions
-  - [ ] Outbound traffic audit logging
+- [x] **Network Firewall** (`leakage/firewall.rs`):
+  - [x] Whitelist-only outbound connections (LLM APIs only by default)
+  - [x] Block unauthorized domains, ports, and protocols
+  - [x] Configurable `NetworkPolicy` with wildcard domain patterns
+  - [x] Outbound traffic audit logging via `NetworkExfil` vector
 - [x] **Tool Call Interceptor** (`leakage/interceptor.rs`):
   - [x] Scan tool arguments for tainted data
   - [x] Block dangerous commands (curl, wget, nc, ssh, scp, rsync, etc.) with shell separator awareness
   - [x] Filesystem write restrictions (detect tainted data in write_file/edit/create_file)
   - [x] Audit log all blocked tool invocations with severity and leakage vector
-- [ ] **Session Isolation**:
-  - [ ] Strict memory isolation between sessions
-  - [ ] No cross-session data access
-  - [ ] Secure memory wipe on session end
-  - [ ] Wipe verification and attestation
-- [ ] **Prompt Injection Defense**:
-  - [ ] Detect common injection patterns
-  - [ ] Input sanitization and validation
-  - [ ] Hardened system prompts
-  - [ ] Anomaly detection for suspicious requests
+- [x] **Session Isolation** (`leakage/isolation.rs`):
+  - [x] Per-session `TaintRegistry` and `AuditLog` scoping via `SessionIsolation`
+  - [x] No cross-session data access (guard-based access control)
+  - [x] Secure memory wipe on session termination (overwrite + verify)
+  - [x] Wipe verification (`WipeResult.verified`)
+  - [x] Wired into `SessionManager`: auto-init on create, auto-wipe on terminate/shutdown
+- [x] **Prompt Injection Defense** (`leakage/injection.rs`):
+  - [x] Detect common injection patterns (role override, data extraction, delimiter injection, safety bypass)
+  - [x] Base64-encoded injection payload detection
+  - [x] Configurable custom blocking/suspicious patterns
+  - [x] Wired into `SessionManager::process_in_tee()` — blocks before forwarding to TEE
+  - [x] Audit events: Critical for blocked, Warning for suspicious
 - [x] **Leakage Audit Log** (`leakage/audit.rs`):
   - [x] Structured `AuditEvent` with id, session, severity, vector, description, timestamp
   - [x] Bounded in-memory `AuditLog` with capacity eviction

@@ -18,11 +18,17 @@
 //! ```
 
 pub mod audit;
+pub mod firewall;
+pub mod injection;
 pub mod interceptor;
+pub mod isolation;
 pub mod sanitizer;
 pub mod taint;
 
 pub use audit::{AuditEvent, AuditLog, AuditSeverity, LeakageVector};
+pub use firewall::{FirewallDecision, FirewallResult, NetworkFirewall, NetworkPolicy};
+pub use injection::{InjectionCategory, InjectionDetector, InjectionResult, InjectionVerdict};
 pub use interceptor::{InterceptDecision, InterceptResult, ToolInterceptor};
+pub use isolation::{SessionIsolation, WipeResult};
 pub use sanitizer::{OutputSanitizer, SanitizeResult};
 pub use taint::{TaintEntry, TaintMatch, TaintRegistry, TaintType};

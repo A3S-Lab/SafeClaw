@@ -110,6 +110,9 @@ pub use config::{A3sGatewayConfig, SafeClawConfig};
 pub use error::{Error, Result};
 pub use events::{events_router, EventStore, EventsState};
 pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};
-pub use leakage::{AuditLog, OutputSanitizer, TaintRegistry, ToolInterceptor};
+pub use leakage::{
+    AuditLog, InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer,
+    SessionIsolation, TaintRegistry, ToolInterceptor,
+};
 pub use personas::{personas_router, PersonaStore, PersonasState};
 pub use settings::{settings_router, SettingsState};
