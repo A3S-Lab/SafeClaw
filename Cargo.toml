@@ -102,6 +102,12 @@ bytes = "1.5"
 # Agent module dependencies
 dirs-next = "2.0"
 
+[features]
+default = []
+## Enable MockTransport fallback for testing without a real TEE MicroVM.
+## Production builds should NOT enable this — use TeeOrchestrator + RA-TLS instead.
+mock-tee = []
+
 [build-dependencies]
 tonic-build = "0.11"
 prost-build = "0.12"
