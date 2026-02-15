@@ -4,6 +4,7 @@
 //! across different messaging platforms.
 
 mod adapter;
+pub mod auth;
 mod dingtalk;
 mod discord;
 mod feishu;
@@ -14,6 +15,10 @@ mod webchat;
 mod wecom;
 
 pub use adapter::{ChannelAdapter, ChannelEvent};
+pub use auth::{
+    AuthMiddleware, AuthOutcome, ChannelAuth, DingTalkAuth, DiscordAuth, FeishuAuth, SlackAuth,
+    TelegramAuth, WeComAuth,
+};
 pub use dingtalk::DingTalkAdapter;
 pub use discord::DiscordAdapter;
 pub use feishu::FeishuAdapter;
