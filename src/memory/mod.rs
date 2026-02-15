@@ -6,6 +6,7 @@
 
 pub mod artifact;
 pub mod artifact_store;
+pub mod bounded;
 pub mod extractor;
 pub mod gate;
 pub mod insight;
@@ -16,6 +17,7 @@ pub mod synthesizer;
 
 pub use artifact::{Artifact, ArtifactType};
 pub use artifact_store::ArtifactStore;
+pub use bounded::{BoundedStore, Erasable, HasId, DEFAULT_CAPACITY};
 pub use extractor::Extractor;
 pub use gate::PrivacyGate;
 pub use insight::{Insight, InsightType};
