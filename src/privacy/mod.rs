@@ -4,14 +4,20 @@
 //! decisions for TEE processing. Includes:
 //! - Regex-based classification (PII patterns)
 //! - Semantic analysis (natural language PII disclosure)
+//! - Pluggable classifier backend architecture
 //! - Compliance rule engines (HIPAA, PCI-DSS, GDPR)
 
+pub mod backend;
 pub mod classifier;
 pub mod compliance;
 pub mod handler;
 mod policy;
 pub mod semantic;
 
+pub use backend::{
+    ClassifierBackend, CompositeClassifier, CompositeResult, PiiMatch, RegexBackend,
+    SemanticBackend,
+};
 pub use classifier::{ClassificationResult, Classifier, Match};
 pub use compliance::{ComplianceEngine, ComplianceFramework, ComplianceRuleSet};
 pub use handler::{privacy_router, PrivacyState};

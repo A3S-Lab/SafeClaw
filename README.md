@@ -1585,20 +1585,20 @@ guarantees or fails to match the stated threat model.
 
 Without a formal threat model, all security measures are ad-hoc guesses.
 
-- [ ] **`docs/threat-model.md`**: Define trust boundaries, adversary capabilities, and attack surfaces
+- [x] **`docs/threat-model.md`**: Define trust boundaries, adversary capabilities, and attack surfaces
   - Who are the adversaries? (malicious user, compromised AI model, network attacker, platform operator)
   - What are the trust boundaries? (user ↔ SafeClaw, SafeClaw ↔ AI model, SafeClaw ↔ TEE, SafeClaw ↔ channel platform)
   - What attacks are explicitly out of scope? (e.g., physical access to host)
   - Map each existing security module to the specific attack vectors it defends against
-- [ ] **Annotate each leakage module** with the threat-model section it addresses (code comments linking to doc)
-- [ ] **Identify uncovered vectors**: List attack paths that no current module defends
+- [x] **Annotate each leakage module** with the threat-model section it addresses (code comments linking to doc)
+- [x] **Identify uncovered vectors**: List attack paths that no current module defends
 
 #### 15.2: Pluggable PII Classifier Architecture (P0 — fixes false sense of security)
 
 The regex-only classifier misses semantic PII (addresses in natural language, passwords
 in context, financial info in prose). This is the weakest link in the privacy chain.
 
-- [ ] **`ClassifierBackend` trait**: Pluggable classification interface
+- [x] **`ClassifierBackend` trait**: Pluggable classification interface
   ```rust
   #[async_trait]
   pub trait ClassifierBackend: Send + Sync {
@@ -1606,17 +1606,17 @@ in context, financial info in prose). This is the weakest link in the privacy ch
       fn confidence_floor(&self) -> f64; // minimum confidence this backend can guarantee
   }
   ```
-- [ ] **`RegexBackend`**: Wrap current `Classifier` as one backend (fast, high-precision, low-recall)
-- [ ] **`SemanticBackend`**: Wrap current `SemanticAnalyzer` as second backend
+- [x] **`RegexBackend`**: Wrap current `Classifier` as one backend (fast, high-precision, low-recall)
+- [x] **`SemanticBackend`**: Wrap current `SemanticAnalyzer` as second backend
 - [ ] **`LlmBackend`** (behind feature flag `llm-classifier`): Call local or remote LLM for classification
   - Structured output prompt: "Identify all PII in this text, return JSON array"
   - Use a3s-code local service (Phase 11) or direct API call
   - Configurable: which model, max latency, fallback to regex on timeout
-- [ ] **`CompositeClassifier`**: Chain multiple backends, merge results, deduplicate by span overlap
+- [x] **`CompositeClassifier`**: Chain multiple backends, merge results, deduplicate by span overlap
   - Default chain: Regex → Semantic → (optional) LLM
   - Union of all findings; highest confidence wins on overlap
-- [ ] **Explicit accuracy labeling**: `ClassificationResult` includes `backend: String` field so audit log shows which classifier caught it
-- [ ] **False-negative documentation**: README clearly states regex-only mode limitations
+- [x] **Explicit accuracy labeling**: `ClassificationResult` includes `backend: String` field so audit log shows which classifier caught it
+- [x] **False-negative documentation**: README clearly states regex-only mode limitations
 
 #### 15.3: Stateful Privacy Gate — Cumulative Leakage Tracking (P1)
 
@@ -1655,7 +1655,7 @@ Taint labels are assigned at input but lost during internal transformations.
 `derive_session_key()` uses raw `SHA-256(shared || local_pub || remote_pub)`.
 This is non-standard and unreviewed.
 
-- [ ] **Replace with HKDF-SHA256** (RFC 5869):
+- [x] **Replace with HKDF-SHA256** (RFC 5869):
   ```rust
   use hkdf::Hkdf;
   use sha2::Sha256;
@@ -1669,11 +1669,11 @@ This is non-standard and unreviewed.
       key
   }
   ```
-- [ ] **Add protocol version binding**: Info string includes protocol version to prevent cross-version key reuse
-- [ ] **Forward secrecy**: Use ephemeral X25519 keys per session (not reusable secrets)
+- [x] **Add protocol version binding**: Info string includes protocol version to prevent cross-version key reuse
+- [x] **Forward secrecy**: Use ephemeral X25519 keys per session (not reusable secrets)
   - Replace `ReusableSecret` with `EphemeralSecret` in session handshake
   - Long-term `KeyPair` used only for identity/signing, not key exchange
-- [ ] **Zeroize sensitive material**: Derive `zeroize::Zeroize` on `SecretKey`, `SessionKey`, shared secret intermediates
+- [x] **Zeroize sensitive material**: Derive `zeroize::Zeroize` on `SecretKey`, `SessionKey`, shared secret intermediates
 
 #### 15.6: Unified Channel Authentication Middleware (P1)
 
