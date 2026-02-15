@@ -34,6 +34,7 @@ impl Extractor {
                     .sensitivity(resource.sensitivity)
                     .importance(importance)
                     .tag(&m.rule_name)
+                    .taint_labels(resource.taint_labels.iter().cloned())
                     .build()
                 {
                     artifacts.push(artifact);
@@ -49,6 +50,7 @@ impl Extractor {
             .sensitivity(resource.sensitivity)
             .importance(importance)
             .tag(topic_tag)
+            .taint_labels(resource.taint_labels.iter().cloned())
             .build()
         {
             artifacts.push(artifact);
@@ -200,5 +202,53 @@ mod tests {
             .unwrap();
         assert_eq!(topic.tags, vec!["code"]);
         assert!(topic.content.contains("code"));
+    }
+
+    #[test]
+    fn test_extract_propagates_taint_labels() {
+        let classifier =
+            Classifier::new(default_classification_rules(), SensitivityLevel::Normal).unwrap();
+        let text = "Contact me at test@example.com";
+        let classification = classifier.classify(text);
+        let sensitivity = classification.level;
+
+        let resource = ResourceBuilder::new(ContentType::Text)
+            .user_id("user-1")
+            .channel_id("telegram")
+            .chat_id("chat-1")
+            .raw_content(text.as_bytes().to_vec())
+            .text_content(text)
+            .sensitivity(sensitivity)
+            .classification(classification)
+            .storage_location(StorageLocation::Memory)
+            .taint_label("pii:email")
+            .taint_label("session:abc")
+            .build()
+            .unwrap();
+
+        let artifacts = Extractor::extract(&resource);
+
+        // Every artifact should inherit the resource's taint labels
+        for artifact in &artifacts {
+            assert_eq!(
+                artifact.taint_labels, resource.taint_labels,
+                "artifact '{}' should inherit resource taint labels",
+                artifact.content
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_empty_taint_labels_propagated() {
+        let resource = classified_resource("Hello, how are you?", ContentType::Text);
+        assert!(resource.taint_labels.is_empty());
+
+        let artifacts = Extractor::extract(&resource);
+        for artifact in &artifacts {
+            assert!(
+                artifact.taint_labels.is_empty(),
+                "artifact should have empty taint labels when resource has none"
+            );
+        }
     }
 }

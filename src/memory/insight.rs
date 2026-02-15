@@ -9,7 +9,7 @@ use crate::config::SensitivityLevel;
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// A cross-conversation knowledge insight synthesized from multiple Artifacts (Layer 3).
@@ -33,6 +33,8 @@ pub struct Insight {
     pub evidence_count: u32,
     /// Searchable tags
     pub tags: Vec<String>,
+    /// Taint labels inherited from source Artifacts (union of all sources).
+    pub taint_labels: HashSet<String>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last time this insight was accessed
@@ -89,6 +91,7 @@ pub struct InsightBuilder {
     importance: f32,
     evidence_count: u32,
     tags: Vec<String>,
+    taint_labels: HashSet<String>,
     metadata: HashMap<String, serde_json::Value>,
 }
 
@@ -104,6 +107,7 @@ impl InsightBuilder {
             importance: 0.0,
             evidence_count: 0,
             tags: Vec::new(),
+            taint_labels: HashSet::new(),
             metadata: HashMap::new(),
         }
     }
@@ -156,6 +160,18 @@ impl InsightBuilder {
         self
     }
 
+    /// Add a taint label
+    pub fn taint_label(mut self, label: impl Into<String>) -> Self {
+        self.taint_labels.insert(label.into());
+        self
+    }
+
+    /// Set taint labels from an iterator
+    pub fn taint_labels(mut self, labels: impl IntoIterator<Item = String>) -> Self {
+        self.taint_labels.extend(labels);
+        self
+    }
+
     /// Add a metadata entry
     pub fn metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
@@ -179,6 +195,7 @@ impl InsightBuilder {
             importance: self.importance,
             evidence_count: self.evidence_count,
             tags: self.tags,
+            taint_labels: self.taint_labels,
             created_at: Utc::now(),
             last_accessed: None,
             access_count: 0,
@@ -318,6 +335,7 @@ mod tests {
             importance: 1.0,
             evidence_count: 5,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now() - chrono::Duration::days(90),
             last_accessed: None,
             access_count: 0,
@@ -344,6 +362,7 @@ mod tests {
             importance: 0.5,
             evidence_count: 2,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now(),
             last_accessed: None,
             access_count: 0,
@@ -416,6 +435,7 @@ mod tests {
             importance: 0.5,
             evidence_count: 1,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now() - chrono::Duration::days(60),
             last_accessed: Some(Utc::now() - chrono::Duration::days(60)),
             access_count: 1,
@@ -492,6 +512,7 @@ mod tests {
             importance: 0.0,
             evidence_count: 0,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now() - chrono::Duration::days(365),
             last_accessed: None,
             access_count: 0,

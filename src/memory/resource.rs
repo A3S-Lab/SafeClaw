@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::privacy::ClassificationResult;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -40,6 +40,9 @@ pub struct Resource {
     pub classification: Option<ClassificationResult>,
     /// Where this resource should be stored
     pub storage_location: StorageLocation,
+    /// Taint labels from input classification (taint IDs).
+    /// Propagated to Artifacts derived from this Resource.
+    pub taint_labels: HashSet<String>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Arbitrary metadata
@@ -95,6 +98,7 @@ pub struct ResourceBuilder {
     sensitivity: SensitivityLevel,
     classification: Option<ClassificationResult>,
     storage_location: StorageLocation,
+    taint_labels: HashSet<String>,
     metadata: HashMap<String, serde_json::Value>,
 }
 
@@ -111,6 +115,7 @@ impl ResourceBuilder {
             sensitivity: SensitivityLevel::Normal,
             classification: None,
             storage_location: StorageLocation::Memory,
+            taint_labels: HashSet::new(),
             metadata: HashMap::new(),
         }
     }
@@ -169,6 +174,18 @@ impl ResourceBuilder {
         self
     }
 
+    /// Add a taint label
+    pub fn taint_label(mut self, label: impl Into<String>) -> Self {
+        self.taint_labels.insert(label.into());
+        self
+    }
+
+    /// Set taint labels from an iterator
+    pub fn taint_labels(mut self, labels: impl IntoIterator<Item = String>) -> Self {
+        self.taint_labels.extend(labels);
+        self
+    }
+
     /// Build the resource, returning an error if required fields are missing
     pub fn build(self) -> Result<Resource> {
         let user_id = self
@@ -192,6 +209,7 @@ impl ResourceBuilder {
             sensitivity: self.sensitivity,
             classification: self.classification,
             storage_location: self.storage_location,
+            taint_labels: self.taint_labels,
             created_at: Utc::now(),
             metadata: self.metadata,
         })
@@ -303,5 +321,49 @@ mod tests {
         let json = serde_json::to_string(&memory).unwrap();
         let deserialized: StorageLocation = serde_json::from_str(&json).unwrap();
         assert_eq!(memory, deserialized);
+    }
+
+    #[test]
+    fn test_resource_builder_taint_labels() {
+        let resource = ResourceBuilder::new(ContentType::Text)
+            .user_id("user-1")
+            .channel_id("telegram")
+            .chat_id("chat-1")
+            .taint_label("pii:email")
+            .taint_label("pii:phone")
+            .build()
+            .unwrap();
+
+        assert_eq!(resource.taint_labels.len(), 2);
+        assert!(resource.taint_labels.contains("pii:email"));
+        assert!(resource.taint_labels.contains("pii:phone"));
+    }
+
+    #[test]
+    fn test_resource_builder_taint_labels_from_iter() {
+        let labels = vec!["pii:ssn".to_string(), "pii:address".to_string()];
+        let resource = ResourceBuilder::new(ContentType::Text)
+            .user_id("user-1")
+            .channel_id("telegram")
+            .chat_id("chat-1")
+            .taint_labels(labels)
+            .build()
+            .unwrap();
+
+        assert_eq!(resource.taint_labels.len(), 2);
+        assert!(resource.taint_labels.contains("pii:ssn"));
+        assert!(resource.taint_labels.contains("pii:address"));
+    }
+
+    #[test]
+    fn test_resource_builder_default_empty_taint() {
+        let resource = ResourceBuilder::new(ContentType::Text)
+            .user_id("user-1")
+            .channel_id("telegram")
+            .chat_id("chat-1")
+            .build()
+            .unwrap();
+
+        assert!(resource.taint_labels.is_empty());
     }
 }

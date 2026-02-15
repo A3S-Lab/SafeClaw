@@ -9,7 +9,7 @@ use crate::config::SensitivityLevel;
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// A structured knowledge artifact extracted from one or more Resources (Layer 2).
@@ -29,6 +29,9 @@ pub struct Artifact {
     pub importance: f32,
     /// Searchable tags
     pub tags: Vec<String>,
+    /// Taint labels inherited from source Resources (union of all sources).
+    /// Propagated to Insights derived from this Artifact.
+    pub taint_labels: HashSet<String>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last time this artifact was accessed
@@ -85,6 +88,7 @@ pub struct ArtifactBuilder {
     sensitivity: SensitivityLevel,
     importance: f32,
     tags: Vec<String>,
+    taint_labels: HashSet<String>,
     metadata: HashMap<String, serde_json::Value>,
 }
 
@@ -98,6 +102,7 @@ impl ArtifactBuilder {
             sensitivity: SensitivityLevel::Normal,
             importance: 0.0,
             tags: Vec::new(),
+            taint_labels: HashSet::new(),
             metadata: HashMap::new(),
         }
     }
@@ -132,6 +137,18 @@ impl ArtifactBuilder {
         self
     }
 
+    /// Add a taint label
+    pub fn taint_label(mut self, label: impl Into<String>) -> Self {
+        self.taint_labels.insert(label.into());
+        self
+    }
+
+    /// Set taint labels from an iterator
+    pub fn taint_labels(mut self, labels: impl IntoIterator<Item = String>) -> Self {
+        self.taint_labels.extend(labels);
+        self
+    }
+
     /// Add a metadata entry
     pub fn metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
@@ -153,6 +170,7 @@ impl ArtifactBuilder {
             sensitivity: self.sensitivity,
             importance: self.importance,
             tags: self.tags,
+            taint_labels: self.taint_labels,
             created_at: Utc::now(),
             last_accessed: None,
             access_count: 0,
@@ -248,6 +266,7 @@ mod tests {
             sensitivity: SensitivityLevel::Sensitive,
             importance: 1.0,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now() - chrono::Duration::days(90),
             last_accessed: None,
             access_count: 0,
@@ -274,6 +293,7 @@ mod tests {
             sensitivity: SensitivityLevel::Normal,
             importance: 0.5,
             tags: vec![],
+            taint_labels: HashSet::new(),
             created_at: Utc::now(),
             last_accessed: None,
             access_count: 0,

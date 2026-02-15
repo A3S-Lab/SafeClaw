@@ -60,6 +60,12 @@ impl Synthesizer {
             let importance = Self::avg_importance(group);
             let ids: Vec<Uuid> = group.iter().map(|a| a.id).collect();
 
+            // Union taint labels from all source artifacts
+            let taint_union: HashSet<String> = group
+                .iter()
+                .flat_map(|a| a.taint_labels.iter().cloned())
+                .collect();
+
             // Collect tags from all source artifacts, deduplicated
             let mut tags: Vec<String> = group
                 .iter()
@@ -80,6 +86,7 @@ impl Synthesizer {
                 .importance(importance)
                 .evidence_count(group.len() as u32)
                 .tag("entity_frequency")
+                .taint_labels(taint_union)
                 .build()
             {
                 // Replace the single tag with the full deduplicated set
@@ -116,6 +123,12 @@ impl Synthesizer {
             let importance = Self::avg_importance(group);
             let ids: Vec<Uuid> = group.iter().map(|a| a.id).collect();
 
+            // Union taint labels from all source artifacts
+            let taint_union: HashSet<String> = group
+                .iter()
+                .flat_map(|a| a.taint_labels.iter().cloned())
+                .collect();
+
             if let Ok(insight) = InsightBuilder::new(InsightType::Summary)
                 .source_artifacts(ids)
                 .content(format!(
@@ -128,6 +141,7 @@ impl Synthesizer {
                 .evidence_count(group.len() as u32)
                 .tag(tag.to_string())
                 .tag("topic_aggregation")
+                .taint_labels(taint_union)
                 .build()
             {
                 results.push(insight);
@@ -181,6 +195,14 @@ impl Synthesizer {
                     let sensitivity = Self::max_sensitivity(&[a, b]);
                     let importance = Self::avg_importance(&[a, b]);
 
+                    // Union taint labels from both artifacts
+                    let taint_union: HashSet<String> = a
+                        .taint_labels
+                        .iter()
+                        .chain(b.taint_labels.iter())
+                        .cloned()
+                        .collect();
+
                     if let Ok(insight) = InsightBuilder::new(InsightType::Correlation)
                         .source_artifact(a.id)
                         .source_artifact(b.id)
@@ -193,6 +215,7 @@ impl Synthesizer {
                         .importance(importance)
                         .evidence_count(2)
                         .tag("co_occurrence")
+                        .taint_labels(taint_union)
                         .build()
                     {
                         results.push(insight);
@@ -885,5 +908,93 @@ mod tests {
         assert!(correlation.content.contains("alice@example.com"));
         assert!(correlation.content.contains("555-1234"));
         assert!(correlation.content.contains("co-occur"));
+    }
+
+    #[test]
+    fn test_entity_frequency_taint_propagation() {
+        let mut a1 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &[], &[]);
+        a1.taint_labels.insert("pii:email".to_string());
+        a1.taint_labels.insert("session:abc".to_string());
+
+        let mut a2 = entity("test@example.com", SensitivityLevel::Sensitive, 0.7, &[], &[]);
+        a2.taint_labels.insert("pii:email".to_string());
+        a2.taint_labels.insert("session:def".to_string());
+
+        let insights = Synthesizer::synthesize(&[a1, a2]);
+
+        let pattern = insights
+            .iter()
+            .find(|i| i.insight_type == InsightType::Pattern)
+            .unwrap();
+        // Union of all taint labels
+        assert_eq!(pattern.taint_labels.len(), 3);
+        assert!(pattern.taint_labels.contains("pii:email"));
+        assert!(pattern.taint_labels.contains("session:abc"));
+        assert!(pattern.taint_labels.contains("session:def"));
+    }
+
+    #[test]
+    fn test_topic_aggregation_taint_propagation() {
+        let mut t1 = topic("code", SensitivityLevel::Normal, 0.4);
+        t1.taint_labels.insert("src:channel-a".to_string());
+
+        let mut t2 = topic("code", SensitivityLevel::Normal, 0.6);
+        t2.taint_labels.insert("src:channel-b".to_string());
+
+        let insights = Synthesizer::synthesize(&[t1, t2]);
+
+        let summary = insights
+            .iter()
+            .find(|i| i.insight_type == InsightType::Summary)
+            .unwrap();
+        assert_eq!(summary.taint_labels.len(), 2);
+        assert!(summary.taint_labels.contains("src:channel-a"));
+        assert!(summary.taint_labels.contains("src:channel-b"));
+    }
+
+    #[test]
+    fn test_co_occurrence_taint_propagation() {
+        let resource_id = Uuid::new_v4();
+        let mut a1 = entity(
+            "alice@example.com",
+            SensitivityLevel::Normal,
+            0.5,
+            &[],
+            &[resource_id],
+        );
+        a1.taint_labels.insert("pii:email".to_string());
+
+        let mut a2 = entity(
+            "555-1234",
+            SensitivityLevel::Sensitive,
+            0.7,
+            &[],
+            &[resource_id],
+        );
+        a2.taint_labels.insert("pii:phone".to_string());
+
+        let insights = Synthesizer::synthesize(&[a1, a2]);
+
+        let correlation = insights
+            .iter()
+            .find(|i| i.insight_type == InsightType::Correlation)
+            .unwrap();
+        assert_eq!(correlation.taint_labels.len(), 2);
+        assert!(correlation.taint_labels.contains("pii:email"));
+        assert!(correlation.taint_labels.contains("pii:phone"));
+    }
+
+    #[test]
+    fn test_empty_taint_labels_propagated() {
+        let a1 = entity("test@example.com", SensitivityLevel::Normal, 0.5, &[], &[]);
+        let a2 = entity("test@example.com", SensitivityLevel::Normal, 0.5, &[], &[]);
+
+        let insights = Synthesizer::synthesize(&[a1, a2]);
+
+        let pattern = insights
+            .iter()
+            .find(|i| i.insight_type == InsightType::Pattern)
+            .unwrap();
+        assert!(pattern.taint_labels.is_empty());
     }
 }
