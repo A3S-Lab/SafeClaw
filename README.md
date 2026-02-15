@@ -248,7 +248,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Automatic Classification**: Detect PII, credentials, and secrets automatically
 - **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
 - **Compliance Rule Engine**: Pre-built HIPAA, PCI-DSS, GDPR rule sets with custom rule support
-- **Unified REST API**: 30+ endpoints with CORS, privacy/audit/compliance APIs, webhook ingestion, consistent error format
+- **Unified REST API**: 34 endpoints (33 REST + 1 WebSocket) with CORS, privacy/audit/compliance APIs, webhook ingestion, consistent error format. See [API Reference](#api-reference)
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Output Sanitization**: Prevent AI from leaking sensitive data in responses via taint tracking, output scanning, and tool call interception
 - **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
@@ -1642,6 +1642,87 @@ Continuous runtime verification and audit:
   - [x] Context-aware PII detection via `privacy/semantic.rs` (trigger-phrase based, 9 categories, Chinese support)
   - [x] Enterprise compliance rules via `privacy/compliance.rs` (HIPAA, PCI-DSS, GDPR pre-built rule sets)
   - [ ] Local ML model for further false-positive reduction (future)
+
+## API Reference
+
+SafeClaw exposes **33 REST endpoints + 1 WebSocket** organized into 8 modules. All responses use JSON. Error responses follow `{"error": {"code": "...", "message": "..."}}` format. CORS is enabled for all origins by default.
+
+### System
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check probe. Returns `{"status":"ok","version":"0.1.0"}` |
+| GET | `/.well-known/a3s-service.json` | Service discovery for a3s-gateway auto-registration |
+
+### Gateway (`/api/v1/gateway`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/gateway/status` | Gateway state, TEE status, active session count, channels |
+| GET | `/api/v1/gateway/sessions` | List all active sessions (id, userId, channelId, usesTee, messageCount) |
+| GET | `/api/v1/gateway/sessions/:id` | Get single session detail. 404 if not found |
+| POST | `/api/v1/gateway/message` | Send outbound message. Body: `{"channel","chat_id","content"}` |
+| POST | `/api/v1/gateway/webhook/:channel` | Ingest webhook payload from a channel adapter |
+
+### Agent (`/api/agent`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/agent/sessions` | Create agent session. Body: `{"model?","permission_mode?","cwd?"}`. Returns 201 |
+| GET | `/api/agent/sessions` | List all agent sessions |
+| GET | `/api/agent/sessions/:id` | Get agent session detail. 404 if not found |
+| PATCH | `/api/agent/sessions/:id` | Update session name/archived. Body: `{"name?","archived?"}` |
+| DELETE | `/api/agent/sessions/:id` | Delete session. Returns 204 |
+| POST | `/api/agent/sessions/:id/relaunch` | Destroy and recreate session with same config |
+| GET | `/api/agent/backends` | List available model backends (id, name, provider, isDefault) |
+| WS | `/ws/agent/browser/:id` | WebSocket upgrade for browser UI (JSON protocol) |
+
+### Privacy (`/api/v1/privacy`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/privacy/classify` | Regex-based PII classification. Body: `{"text","min_level?"}`. Returns matches with sensitivity levels |
+| POST | `/api/v1/privacy/analyze` | Semantic PII disclosure detection. Body: `{"text"}`. Returns trigger-phrase matches with confidence scores |
+| POST | `/api/v1/privacy/scan` | Combined scan (regex + semantic + compliance). Body: `{"text","min_level?","frameworks?"}`. Returns all findings |
+| GET | `/api/v1/privacy/compliance/frameworks` | List available compliance frameworks (HIPAA, PCI-DSS, GDPR) with rule counts and TEE requirements |
+| GET | `/api/v1/privacy/compliance/rules?framework=` | List compliance rules, optionally filtered by framework |
+
+### Audit (`/api/v1/audit`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/audit/events?session=&severity=&limit=` | List audit events with optional session/severity filter and pagination |
+| GET | `/api/v1/audit/events/:id` | Get single audit event by ID |
+| GET | `/api/v1/audit/stats` | Summary statistics: total events, breakdown by severity and leakage vector |
+
+### Settings (`/api/v1/settings`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/settings` | Get current settings (API keys masked: `sk-ant-a****7890`) |
+| PATCH | `/api/v1/settings` | Update settings. Body: `{"provider?","model?","baseUrl?","apiKey?"}` |
+| POST | `/api/v1/settings/reset` | Reset all settings to defaults |
+| GET | `/api/v1/settings/info` | Server info: version, OS, uptime, feature flags |
+
+### Personas (`/api/v1/personas`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/personas` | List all personas (built-in + custom) |
+| GET | `/api/v1/personas/:id` | Get persona detail. 404 if not found |
+| POST | `/api/v1/personas` | Create custom persona. Body: `{"name","description"}`. Returns 201 |
+| PATCH | `/api/v1/personas/:id` | Update custom persona. 403 for built-in personas |
+| GET | `/api/v1/user/profile` | Current user profile (id, nickname, email, avatar) |
+
+### Events (`/api/v1/events`)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/events?category=&q=&since=&page=&perPage=` | List events with filtering and pagination |
+| GET | `/api/v1/events/:id` | Get single event detail |
+| POST | `/api/v1/events` | Create event. Body: `{"category","topic","summary","detail","source","subscribers?"}` |
+| GET | `/api/v1/events/counts?since=` | Event counts by category |
+| PUT | `/api/v1/events/subscriptions/:personaId` | Update persona's event subscriptions. Body: `{"categories":[...]}` |
 
 ## A3S Ecosystem
 
