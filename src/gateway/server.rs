@@ -39,14 +39,14 @@ pub struct Gateway {
 
 impl Gateway {
     /// Create a new gateway with the given configuration
-    pub fn new(config: SafeClawConfig) -> Self {
+    pub fn new(config: SafeClawConfig) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(1000);
 
         let session_manager = Arc::new(SessionManager::new(config.tee.clone()));
 
         let classifier = Arc::new(
             Classifier::new(config.privacy.rules.clone(), config.privacy.default_level)
-                .expect("Failed to create classifier"),
+                .map_err(|e| Error::Privacy(format!("Failed to create classifier: {}", e)))?,
         );
         let policy_engine = Arc::new(PolicyEngine::new());
 
@@ -56,7 +56,7 @@ impl Gateway {
             policy_engine,
         ));
 
-        Self {
+        Ok(Self {
             config,
             state: Arc::new(RwLock::new(GatewayState::Stopped)),
             session_manager,
@@ -64,7 +64,7 @@ impl Gateway {
             channels: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: Arc::new(RwLock::new(Some(event_rx))),
-        }
+        })
     }
 
     /// Get current state
@@ -496,7 +496,7 @@ impl GatewayBuilder {
     }
 
     /// Build the gateway
-    pub fn build(self) -> Gateway {
+    pub fn build(self) -> Result<Gateway> {
         Gateway::new(self.config)
     }
 }
@@ -517,7 +517,8 @@ mod tests {
             .host("127.0.0.1")
             .port(18790)
             .tee_enabled(true)
-            .build();
+            .build()
+            .unwrap();
 
         assert_eq!(gateway.state().await, GatewayState::Stopped);
         assert_eq!(gateway.config().gateway.port, 18790);
@@ -525,7 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gateway_lifecycle() {
-        let gateway = GatewayBuilder::new().tee_enabled(false).build();
+        let gateway = GatewayBuilder::new().tee_enabled(false).build().unwrap();
 
         gateway.start().await.unwrap();
         assert_eq!(gateway.state().await, GatewayState::Running);

@@ -20,6 +20,7 @@
 //! | `/ws/agent/browser/:id`         | agent    | Agent WebSocket                |
 
 use crate::agent::{agent_router, AgentState};
+use crate::error::to_json;
 use crate::events::{events_router, EventsState};
 use crate::gateway::Gateway;
 use crate::leakage::audit::AuditLog;
@@ -215,7 +216,7 @@ async fn gateway_webhook(
     body: String,
 ) -> impl IntoResponse {
     match gateway.process_webhook(&channel, &body).await {
-        Ok(Some(response)) => (StatusCode::OK, Json(serde_json::to_value(response).unwrap())),
+        Ok(Some(response)) => (StatusCode::OK, Json(to_json(response))),
         Ok(None) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ignored", "reason": "no actionable content"})),

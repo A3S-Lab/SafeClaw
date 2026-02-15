@@ -7,6 +7,7 @@
 //! - GET    /api/v1/events/counts    — category counts
 //! - PUT    /api/v1/events/subscriptions/:personaId — update subscriptions
 
+use crate::error::to_json;
 use crate::events::store::EventStore;
 use crate::events::types::*;
 use axum::{
@@ -91,13 +92,13 @@ async fn get_event(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.store.get_event(&id).await {
-        Some(event) => (StatusCode::OK, Json(serde_json::to_value(event).unwrap())),
+        Some(event) => (StatusCode::OK, Json(to_json(event))),
         None => (
             StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ApiError::not_found(format!("Event {} not found", id)))
-                    .unwrap(),
-            ),
+            Json(to_json(ApiError::not_found(format!(
+                "Event {} not found",
+                id
+            )))),
         ),
     }
 }
@@ -108,10 +109,7 @@ async fn create_event(
     Json(request): Json<CreateEventRequest>,
 ) -> impl IntoResponse {
     let event = state.store.create_event(request).await;
-    (
-        StatusCode::CREATED,
-        Json(serde_json::to_value(event).unwrap()),
-    )
+    (StatusCode::CREATED, Json(to_json(event)))
 }
 
 /// GET /api/v1/events/counts

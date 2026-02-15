@@ -5,6 +5,7 @@
 //! - GET /api/v1/audit/events/:id   — get single audit event
 //! - GET /api/v1/audit/stats        — summary statistics
 
+use crate::error::to_json;
 use crate::leakage::audit::{AuditEvent, AuditLog, AuditSeverity};
 use axum::{
     extract::{Path, Query, State},
@@ -110,7 +111,7 @@ async fn get_event(
     // Search through recent events for the matching ID
     let all = log.recent(log.len());
     match all.into_iter().find(|e| e.id == id) {
-        Some(event) => (StatusCode::OK, Json(serde_json::to_value(event).unwrap())),
+        Some(event) => (StatusCode::OK, Json(to_json(event))),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": {"code": "NOT_FOUND", "message": format!("Audit event {} not found", id)}})),

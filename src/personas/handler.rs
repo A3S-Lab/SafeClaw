@@ -7,6 +7,7 @@
 //! - PATCH  /api/v1/personas/:id   — update persona
 //! - GET    /api/v1/user/profile   — current user info
 
+use crate::error::to_json;
 use crate::events::types::ApiError;
 use crate::personas::store::PersonaStore;
 use crate::personas::types::*;
@@ -54,17 +55,14 @@ async fn get_persona(
     match state.store.get(&id).await {
         Some(persona) => (
             StatusCode::OK,
-            Json(serde_json::to_value(persona).unwrap()),
+            Json(to_json(persona)),
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ApiError::not_found(format!(
-                    "Persona '{}' not found",
-                    id
-                )))
-                .unwrap(),
-            ),
+            Json(to_json(ApiError::not_found(format!(
+                "Persona '{}' not found",
+                id
+            )))),
         ),
     }
 }
@@ -77,11 +75,11 @@ async fn create_persona(
     match state.store.create(request).await {
         Ok(persona) => (
             StatusCode::CREATED,
-            Json(serde_json::to_value(persona).unwrap()),
+            Json(to_json(persona)),
         ),
         Err(err) => (
             StatusCode::CONFLICT,
-            Json(serde_json::to_value(err).unwrap()),
+            Json(to_json(err)),
         ),
     }
 }
@@ -95,7 +93,7 @@ async fn update_persona(
     match state.store.update(&id, request).await {
         Ok(persona) => (
             StatusCode::OK,
-            Json(serde_json::to_value(persona).unwrap()),
+            Json(to_json(persona)),
         ),
         Err(err) => {
             let status = if err.error.code == "FORBIDDEN" {
@@ -103,7 +101,7 @@ async fn update_persona(
             } else {
                 StatusCode::NOT_FOUND
             };
-            (status, Json(serde_json::to_value(err).unwrap()))
+            (status, Json(to_json(err)))
         }
     }
 }

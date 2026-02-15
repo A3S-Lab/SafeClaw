@@ -7,6 +7,7 @@
 use crate::agent::engine::AgentEngine;
 use crate::agent::types::*;
 use crate::config::ModelsConfig;
+use crate::error::to_json;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -76,7 +77,7 @@ async fn create_session(
     {
         Ok(info) => (
             StatusCode::CREATED,
-            Json(serde_json::to_value(info).unwrap()),
+            Json(to_json(info)),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -94,7 +95,7 @@ async fn list_sessions(State(state): State<AgentState>) -> impl IntoResponse {
 /// Get a specific agent session by ID
 async fn get_session(State(state): State<AgentState>, Path(id): Path<String>) -> impl IntoResponse {
     match state.engine.get_session(&id).await {
-        Some(info) => (StatusCode::OK, Json(serde_json::to_value(info).unwrap())),
+        Some(info) => (StatusCode::OK, Json(to_json(info))),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
@@ -129,8 +130,13 @@ async fn update_session(
         state.engine.set_archived(&id, archived).await;
     }
 
-    let info = state.engine.get_session(&id).await.unwrap();
-    (StatusCode::OK, Json(serde_json::to_value(info).unwrap()))
+    match state.engine.get_session(&id).await {
+        Some(info) => (StatusCode::OK, Json(to_json(info))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        ),
+    }
 }
 
 /// Delete a session and remove all state
@@ -176,7 +182,7 @@ async fn relaunch_session(
         )
         .await
     {
-        Ok(info) => (StatusCode::OK, Json(serde_json::to_value(info).unwrap())),
+        Ok(info) => (StatusCode::OK, Json(to_json(info))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),

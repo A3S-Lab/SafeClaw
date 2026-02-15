@@ -1373,22 +1373,22 @@ The same credit card number may match in one crate but not the other. SafeClaw's
   - [x] Layer 2 (Artifact): Structured knowledge extraction from Resources, ArtifactStore, Extractor
   - [x] Layer 3 (Insight): Cross-conversation knowledge synthesis, InsightStore, Synthesizer (Pattern/Summary/Correlation rules)
 
-### Phase 2: Channels (via A3S Gateway) 🚧
+### Phase 2: Channels ✅
 
-Channel adapters are now provided by **a3s-gateway** (Phase 3: AI Agent Gateway). SafeClaw registers as a backend service and receives multi-channel messages through Gateway's webhook ingestion layer.
+Real channel adapters implemented locally with HTTP API calls, signature verification, and update parsing. Messages also routable through a3s-gateway webhook ingestion.
 
-- [x] Channel adapter trait
-- [x] Telegram adapter (skeleton)
-- [x] WebChat adapter
-- [ ] **Feishu adapter (飞书)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
-- [ ] **DingTalk adapter (钉钉)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
-- [ ] **WeCom adapter (企业微信)**: Implemented in a3s-gateway, routed to SafeClaw via Gateway
-- [ ] Slack adapter (via a3s-gateway)
-- [ ] Discord adapter (via a3s-gateway)
+- [x] Channel adapter trait (`ChannelAdapter` with `send_message`, `parse_update`, `verify_signature`)
+- [x] Telegram adapter (HTTP Bot API, HMAC-SHA-256 signature verification)
+- [x] WebChat adapter (built-in web interface)
+- [x] Feishu adapter (飞书) — tenant access token, AES-CBC event decryption, SHA-256 verification
+- [x] DingTalk adapter (钉钉) — HMAC-SHA256 signature, outgoing webhook support
+- [x] WeCom adapter (企业微信) — AES-256-CBC XML decryption, SHA-1 signature verification
+- [x] Slack adapter — HMAC-SHA256 `X-Slack-Signature` verification, `url_verification` challenge
+- [x] Discord adapter — Ed25519 signature verification, interaction/message event parsing
 
-### Phase 3: Architecture Redesign 🚧
+### Phase 3: Architecture Redesign ✅
 
-Address structural issues identified in design review. See [Known Architecture Issues](#known-architecture-issues) for details.
+Address structural issues identified in design review. All SafeClaw-side items complete; only cross-repo a3s-box framing migration remains (tracked below).
 
 #### Phase 3.1: Extract Shared Privacy Types (P0 — Security Fix) ✅
 
@@ -1587,9 +1587,10 @@ Enhanced privacy classification and protection:
   - [x] Pre-built GDPR rules: National IDs, passports, IBAN, VAT numbers, IP addresses, Article 9 special categories (ethnic, religious, biometric)
   - [x] Custom user-defined rule support via `ComplianceEngine::add_custom_rules()`
   - [x] Per-framework TEE mandatory flag and minimum sensitivity level
-- [ ] **Differential Privacy**:
+- [ ] **Differential Privacy** (research):
   - [ ] Noise injection for statistical queries
   - [ ] Model memorization protection
+  - [ ] Privacy budget tracking (ε-accounting)
 
 ### Phase 8: Production Hardening 📋
 
@@ -1611,7 +1612,7 @@ Production readiness and deployment:
   - [ ] Deployment guide
   - [ ] API documentation
 
-### Phase 9: Runtime Security Audit Pipeline 📋
+### Phase 9: Runtime Security Audit Pipeline 🚧
 
 Continuous runtime verification and audit:
 
@@ -1633,16 +1634,14 @@ Continuous runtime verification and audit:
   - Detect manual modifications to security policies
   - Auto-remediation or alert on drift
   - Drift report in OS Platform Security Dashboard
-- [ ] **Panic Path Elimination**: Systematic audit of unsafe code paths
-  - Classify all `unimplemented!()` / `todo!()` / `panic!()` markers
-  - Replace with `Err(Unimplemented)` for non-critical paths
-  - Add to roadmap for critical paths
-  - CI gate: zero `panic!()` in production code paths
-- [ ] **PII Detection Enhancement**: ML-augmented pattern recognition
-  - Local ML model for context-aware PII detection
-  - "My password is X" semantic pattern recognition
-  - Reduce false positives from regex-only approach
-  - Support for enterprise compliance rules (HIPAA, PCI-DSS, GDPR)
+- [x] **Panic Path Elimination**: Systematic audit of unsafe code paths
+  - [x] Audit all `unwrap()`, `expect()`, `panic!()`, `todo!()`, `unimplemented!()` in production code
+  - [x] Replace with proper `Result`/`Option` error handling
+  - [x] CI gate: zero panics in production code paths
+- [x] **PII Detection Enhancement** (covered by Phase 7):
+  - [x] Context-aware PII detection via `privacy/semantic.rs` (trigger-phrase based, 9 categories, Chinese support)
+  - [x] Enterprise compliance rules via `privacy/compliance.rs` (HIPAA, PCI-DSS, GDPR pre-built rule sets)
+  - [ ] Local ML model for further false-positive reduction (future)
 
 ## A3S Ecosystem
 
@@ -1674,7 +1673,7 @@ cargo build
 
 ### Test
 
-**509 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log).
+**510 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense).
 
 ```bash
 cargo test

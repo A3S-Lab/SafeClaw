@@ -263,7 +263,7 @@ async fn run_gateway(
         .host(&host)
         .port(port)
         .tee_enabled(tee_enabled)
-        .build();
+        .build()?;
 
     gateway.start().await?;
 
@@ -323,7 +323,7 @@ async fn run_serve(
             .host(&host)
             .port(port)
             .tee_enabled(tee_enabled)
-            .build(),
+            .build()?,
     );
 
     gateway.start().await?;

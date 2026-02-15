@@ -1,5 +1,6 @@
 //! HTTP API handler
 
+use crate::error::to_json;
 use crate::gateway::Gateway;
 use axum::{
     extract::State,
@@ -127,7 +128,7 @@ async fn get_session(
                 created_at: session.created_at,
                 message_count: session.message_count().await,
             };
-            (StatusCode::OK, Json(serde_json::to_value(info).unwrap()))
+            (StatusCode::OK, Json(to_json(info)))
         }
         None => (
             StatusCode::NOT_FOUND,

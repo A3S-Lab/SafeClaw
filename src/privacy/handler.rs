@@ -9,6 +9,7 @@
 //! - GET  /api/v1/privacy/compliance/rules      — list rules (filterable by framework)
 
 use crate::config::SensitivityLevel;
+use crate::error::to_json;
 use crate::events::types::ApiError;
 use crate::privacy::classifier::Classifier;
 use crate::privacy::compliance::{ComplianceEngine, ComplianceFramework};
@@ -337,11 +338,10 @@ async fn list_rules(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::to_value(ApiError::bad_request(format!(
+                    Json(to_json(ApiError::bad_request(format!(
                         "Unknown framework: {}. Valid: hipaa, pci-dss, gdpr, custom",
                         fw
-                    )))
-                    .unwrap()),
+                    )))),
                 );
             }
         }
@@ -371,7 +371,7 @@ async fn list_rules(
         })
         .collect();
 
-    (StatusCode::OK, Json(serde_json::to_value(rule_infos).unwrap()))
+    (StatusCode::OK, Json(to_json(rule_infos)))
 }
 
 #[cfg(test)]

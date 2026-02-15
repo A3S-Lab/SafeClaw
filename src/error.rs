@@ -60,3 +60,19 @@ pub enum Error {
 
 /// Result type alias for SafeClaw operations
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Serialize any `Serialize` value to `serde_json::Value` without panicking.
+///
+/// Falls back to a JSON error object if serialization fails (e.g. non-string
+/// map keys or non-finite floats — unlikely for well-typed structs, but
+/// eliminates `unwrap()` from production code).
+pub fn to_json<T: serde::Serialize>(value: T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or_else(|e| {
+        serde_json::json!({
+            "error": {
+                "code": "SERIALIZATION_ERROR",
+                "message": e.to_string()
+            }
+        })
+    })
+}
