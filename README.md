@@ -255,7 +255,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
 - **Desktop UI**: Tauri v2 + React + TypeScript native desktop application
-- **599 tests**
+- **609 tests**
 
 ## Quick Start
 
@@ -1642,13 +1642,16 @@ Taint labels are assigned at input but lost during internal transformations.
   - `Resource` (L1) carries `taint_labels: HashSet<TaintLabel>` from input classification
   - `Artifact` (L2) inherits union of source Resources' taint labels during extraction
   - `Insight` (L3) inherits union of source Artifacts' taint labels during synthesis
-- [ ] **Taint propagation through AI model responses**:
+- [x] **Taint propagation through AI model responses**:
   - If input message has taint T, the model's response inherits taint T (conservative)
-  - `OutputSanitizer` checks taint labels on outbound messages, not just PII regex
+  - `OutputSanitizer` checks taint labels on outbound messages via `TaintRegistry::detect()`
 - [x] **Taint merge rules**: When data from multiple sources combines:
   - Union of all taint labels (conservative default)
   - `TaintLabel::max_sensitivity()` determines the combined sensitivity level
-- [ ] **Taint audit trail**: `AuditEvent` includes taint propagation chain (source → current)
+- [x] **Taint audit trail**: `AuditEvent` includes `taint_labels: Vec<String>` for propagation chain
+  - `AuditEvent::with_taint_labels()` constructor used by `OutputSanitizer` and `ToolInterceptor`
+  - `LeakageVector::AuthFailure` added for channel auth failure auditing
+  - Serialized as `taintLabels` (camelCase), skipped when empty
 
 #### 15.5: Replace Custom Key Derivation with HKDF (P0 — crypto fix)
 
@@ -1701,10 +1704,11 @@ no unified audit trail for auth failures.
   - `TelegramAuth` (NotApplicable — long-polling, no webhook)
 - [x] **`AuthMiddleware`**: Registry-based dispatcher that routes verification by channel name
   - All implementations include replay protection via timestamp age check (default 300s)
-- [ ] **Auth middleware layer**: Axum middleware that runs `ChannelAuth::verify_request()` before handler
+- [x] **Auth middleware layer**: `AuthLayer` — Axum-compatible middleware that runs `ChannelAuth::verify_request()` before handler
   - Unified auth failure logging → `AuditEvent` with `LeakageVector::AuthFailure`
-  - Rate limiting on auth failures per channel
-- [ ] **`ChannelAdapter` trait update**: Add `fn auth(&self) -> &dyn ChannelAuth` method
+  - Rate limiting on auth failures per channel (configurable window + max failures)
+  - `drain_events()` for audit bus integration
+- [x] **`ChannelAdapter` trait update**: Add `fn auth(&self) -> Option<&dyn ChannelAuth>` method (default `None`)
 
 #### 15.7: Bounded State Management and Secure Erasure (P1)
 
@@ -1720,11 +1724,13 @@ no unified audit trail for auth failures.
   - `Artifact`: zeroize `content` on erase
   - `Insight`: zeroize `content` on erase
   - `SecretKey`, `SessionKey`, `SharedSecret`: `#[derive(Zeroize, ZeroizeOnDrop)]` (done in 15.5)
-- [ ] **Lock granularity improvement** (targeted, not wholesale rewrite):
+- [ ] **Lock granularity improvement** (deferred — adds `dashmap` dependency, low priority):
   - `SessionManager`: Replace `RwLock<HashMap<K, V>>` with `DashMap<K, V>` for per-key locking
   - `TaintTracker`: Same — per-session lock instead of global
   - Keep `RwLock` for stores with low contention (PersonaStore, SettingsStore)
-- [ ] **Core dump protection**: `prctl(PR_SET_DUMPABLE, 0)` on Linux at startup (behind feature flag)
+- [x] **Core dump protection**: `prctl(PR_SET_DUMPABLE, 0)` on Linux at startup (behind `hardening` feature flag)
+  - `hardening` module with `harden_process()` called early in `main()`
+  - No-op on non-Linux platforms; requires `libc` optional dependency
 
 #### 15.8: TEE Graceful Degradation with Explicit Security Level (P2)
 
@@ -1922,7 +1928,7 @@ cargo build
 
 ### Test
 
-**527 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense), audit event bus, and real-time alerting.
+**609 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration, agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense, taint audit trail), audit event bus, real-time alerting, and process hardening.
 
 ```bash
 cargo test

@@ -38,6 +38,8 @@ pub enum LeakageVector {
     NetworkExfil,
     /// File write with tainted data
     FileExfil,
+    /// Channel authentication failure
+    AuthFailure,
 }
 
 /// A structured audit event for leakage prevention
@@ -54,6 +56,9 @@ pub struct AuditEvent {
     pub vector: LeakageVector,
     /// Human-readable description
     pub description: String,
+    /// Taint labels involved in this event (for taint audit trail)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub taint_labels: Vec<String>,
     /// Timestamp (milliseconds since epoch)
     pub timestamp: i64,
 }
@@ -72,6 +77,26 @@ impl AuditEvent {
             severity,
             vector,
             description,
+            taint_labels: Vec::new(),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        }
+    }
+
+    /// Create an audit event with taint labels for audit trail.
+    pub fn with_taint_labels(
+        session_id: String,
+        severity: AuditSeverity,
+        vector: LeakageVector,
+        description: String,
+        taint_labels: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id,
+            severity,
+            vector,
+            description,
+            taint_labels,
             timestamp: chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -313,10 +338,44 @@ mod tests {
             LeakageVector::DangerousCommand,
             LeakageVector::NetworkExfil,
             LeakageVector::FileExfil,
+            LeakageVector::AuthFailure,
         ] {
             let json = serde_json::to_string(&vector).unwrap();
             let parsed: LeakageVector = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, vector);
         }
+    }
+
+    #[test]
+    fn test_audit_event_with_taint_labels() {
+        let event = AuditEvent::with_taint_labels(
+            "sess-1".to_string(),
+            AuditSeverity::High,
+            LeakageVector::OutputChannel,
+            "Tainted data leaked".to_string(),
+            vec!["pii:email".to_string(), "pii:phone".to_string()],
+        );
+        assert_eq!(event.taint_labels.len(), 2);
+        assert!(event.taint_labels.contains(&"pii:email".to_string()));
+
+        // Verify serialization includes taint_labels
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("taintLabels"));
+        assert!(json.contains("pii:email"));
+    }
+
+    #[test]
+    fn test_audit_event_empty_taint_labels_skipped() {
+        let event = AuditEvent::new(
+            "sess-1".to_string(),
+            AuditSeverity::Info,
+            LeakageVector::OutputChannel,
+            "No taint".to_string(),
+        );
+        assert!(event.taint_labels.is_empty());
+
+        // Empty taint_labels should be skipped in serialization
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("taintLabels"));
     }
 }

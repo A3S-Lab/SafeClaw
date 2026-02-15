@@ -125,6 +125,11 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Apply OS-level hardening before loading any secrets
+    if let Err(e) = safeclaw::hardening::harden_process() {
+        eprintln!("Warning: process hardening failed: {}", e);
+    }
+
     // Initialize logging
     let log_level = if cli.verbose { "debug" } else { "info" };
     tracing_subscriber::registry()

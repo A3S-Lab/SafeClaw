@@ -1,5 +1,6 @@
 //! Channel adapter trait and common types
 
+use super::auth::ChannelAuth;
 use super::message::{InboundMessage, OutboundMessage};
 use crate::error::Result;
 use async_trait::async_trait;
@@ -70,6 +71,14 @@ pub trait ChannelAdapter: Send + Sync {
 
     /// Check if the adapter is connected
     fn is_connected(&self) -> bool;
+
+    /// Get the channel authenticator for webhook verification.
+    ///
+    /// Returns `None` if the adapter does not use webhook-based auth
+    /// (e.g., long-polling adapters like Telegram).
+    fn auth(&self) -> Option<&dyn ChannelAuth> {
+        None
+    }
 }
 
 /// Channel adapter status

@@ -88,11 +88,14 @@ impl ToolInterceptor {
                 _ => LeakageVector::ToolCall,
             };
 
-            audit_events.push(AuditEvent::new(
+            let taint_ids: Vec<String> = matches.iter().map(|m| m.taint_id.clone()).collect();
+
+            audit_events.push(AuditEvent::with_taint_labels(
                 session_id.to_string(),
                 AuditSeverity::High,
                 vector,
                 reason.clone(),
+                taint_ids,
             ));
 
             return InterceptResult {

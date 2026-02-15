@@ -100,6 +100,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Bytes
 bytes = "1.5"
 
+# OS-level hardening (Linux core dump protection)
+libc = { version = "0.2", optional = true }
+
 # Agent module dependencies
 dirs-next = "2.0"
 
@@ -112,6 +115,9 @@ mock-tee = []
 ## Without this feature, TeeOrchestrator and RaTlsChannel are not compiled,
 ## and SessionManager uses a stub orchestrator that returns errors.
 real-tee = ["dep:a3s-box-runtime", "dep:a3s-box-core"]
+## Enable OS-level process hardening (core dump protection on Linux).
+## Requires libc. Safe to enable on all platforms (no-op on non-Linux).
+hardening = ["dep:libc"]
 
 [build-dependencies]
 tonic-build = "0.11"

@@ -53,11 +53,11 @@ impl OutputSanitizer {
         let sanitized_text = registry.redact(output);
         let redaction_count = matches.len();
 
-        // Generate audit events for each match
+        // Generate audit events for each match, including taint labels
         let audit_events: Vec<AuditEvent> = matches
             .iter()
             .map(|m| {
-                AuditEvent::new(
+                AuditEvent::with_taint_labels(
                     session_id.to_string(),
                     AuditSeverity::High,
                     LeakageVector::OutputChannel,
@@ -71,6 +71,7 @@ impl OutputSanitizer {
                             m.matched_variant.clone()
                         }
                     ),
+                    vec![m.taint_id.clone()],
                 )
             })
             .collect();

@@ -98,6 +98,7 @@ pub mod crypto;
 pub mod error;
 pub mod events;
 pub mod gateway;
+pub mod hardening;
 pub mod leakage;
 pub mod memory;
 pub mod personas;

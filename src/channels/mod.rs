@@ -16,8 +16,8 @@ mod wecom;
 
 pub use adapter::{ChannelAdapter, ChannelEvent};
 pub use auth::{
-    AuthMiddleware, AuthOutcome, ChannelAuth, DingTalkAuth, DiscordAuth, FeishuAuth, SlackAuth,
-    TelegramAuth, WeComAuth,
+    AuthLayer, AuthMiddleware, AuthOutcome, ChannelAuth, DingTalkAuth, DiscordAuth, FeishuAuth,
+    SlackAuth, TelegramAuth, WeComAuth,
 };
 pub use dingtalk::DingTalkAdapter;
 pub use discord::DiscordAdapter;
