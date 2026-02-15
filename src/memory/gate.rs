@@ -3,6 +3,9 @@
 //! Every inbound message passes through the gate, which classifies the
 //! content, evaluates the routing policy, and produces a `Resource` with
 //! the correct sensitivity and storage location.
+//!
+//! **Threat model**: Defends against A1 and A2 at AS-4 (memory system).
+//! See `docs/threat-model.md` §4 AS-4, §5.
 
 use crate::error::Result;
 use crate::privacy::{Classifier, PolicyDecision, PolicyEngine};

@@ -3,6 +3,9 @@
 //! Generates structured audit events when sensitive data leakage
 //! is detected or blocked. Events can be forwarded to NATS, logged,
 //! or stored for compliance.
+//!
+//! **Threat model**: Supports forensics and compliance across all attack surfaces.
+//! See `docs/threat-model.md` §5.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

@@ -3,6 +3,9 @@
 //! Provides per-session data isolation for taint registries and audit logs,
 //! ensuring no cross-session data access. On session termination, all
 //! sensitive data is securely wiped (overwritten with zeros and verified).
+//!
+//! **Threat model**: Defends against A1 (malicious user) at AS-4 (memory system).
+//! See `docs/threat-model.md` §4 AS-4, §5.
 
 use super::audit::AuditLog;
 use super::taint::TaintRegistry;

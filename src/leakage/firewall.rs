@@ -3,6 +3,9 @@
 //! Enforces a whitelist-only policy for outbound network access from within
 //! the TEE environment. Since SafeClaw processes run inside a MicroVM,
 //! network control is enforced at the application layer by validating
+//!
+//! **Threat model**: Defends against A1 (malicious user) and A3 (network attacker) at AS-1.
+//! See `docs/threat-model.md` §4 AS-1, §5.
 //! URLs and hostnames before tool calls are allowed to proceed.
 //!
 //! Default policy: only LLM API endpoints are allowed.

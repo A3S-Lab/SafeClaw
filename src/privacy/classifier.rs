@@ -3,6 +3,10 @@
 //! Thin wrapper around `a3s_privacy::RegexClassifier` that preserves the
 //! existing safeclaw API (field names, method signatures) while delegating
 //! to the shared implementation.
+//!
+//! **Threat model**: Defends against A1 (malicious user) at AS-2 (PII classification).
+//! See `docs/threat-model.md` §4 AS-2, §5.
+//! **Known gap**: Regex-only misses semantic PII — addressed by 15.2 (pluggable classifier).
 
 use crate::config::{ClassificationRule, SensitivityLevel};
 use crate::error::{Error, Result};

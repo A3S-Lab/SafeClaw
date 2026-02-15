@@ -22,7 +22,7 @@ path = "src/main.rs"
 a3s-tools-core = { version = "0.1", path = "../tools-core" }
 a3s-lane = { version = "0.1", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
-a3s-code = { version = "0.4", path = "../code" }
+a3s-code = { version = "0.5", path = "../code" }
 a3s-gateway = { version = "0.1", path = "../gateway" }
 a3s-privacy = { version = "0.1", path = "../privacy" }
 a3s-event = { version = "0.1", path = "../event" }

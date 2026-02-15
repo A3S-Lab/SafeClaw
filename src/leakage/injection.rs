@@ -3,6 +3,9 @@
 //! Detects common prompt injection patterns in user input before forwarding
 //! to the AI agent. Uses pattern matching and heuristics to identify attempts
 //! to override system instructions, extract internal context, or manipulate
+//!
+//! **Threat model**: Defends against A1 (malicious user) at AS-1 (webhook endpoints).
+//! See `docs/threat-model.md` §4 AS-1, §5.
 //! the agent's behavior.
 
 use super::audit::{AuditEvent, AuditSeverity, LeakageVector};

@@ -3,6 +3,9 @@
 //! Detects sensitive data disclosed in natural language that regex patterns miss:
 //! - "my password is hunter2"
 //! - "my SSN is 123456789" (no dashes)
+//!
+//! **Threat model**: Defends against A1 (malicious user) at AS-2 (PII classification).
+//! See `docs/threat-model.md` §4 AS-2, §5.
 //! - "the API key is sk-abc123..."
 //! - "credit card number 4111111111111111" (no separators)
 //!

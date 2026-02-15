@@ -1,4 +1,8 @@
 //! Secure channel for encrypted communication with TEE
+//!
+//! **Threat model**: Defends against A3 (network attacker) and A5 (insider) at AS-5.
+//! See `docs/threat-model.md` §4 AS-5, §5.
+//! **Known gap**: Uses custom SHA-256 key derivation — addressed by 15.5 (HKDF).
 
 use super::{decrypt, encrypt, KEY_SIZE};
 use crate::crypto::keys::{PublicKey, SecretKey};

@@ -1571,6 +1571,237 @@ and fall back to in-process defaults when services are not present.
 - [ ] **Autonomous execution**: Agent runs without user prompt trigger
 - [ ] **Result delivery**: Push to configured channel (full/summary/diff)
 
+### Phase 15: First-Principles Security Hardening 📋
+
+Systematic fixes for architectural defects identified through first-principles analysis.
+Every item below addresses a gap where the current implementation gives false security
+guarantees or fails to match the stated threat model.
+
+> **Guiding principle**: SafeClaw's core mission is *privacy-preserving AI assistant
+> runtime*. Every change in this phase must close a real gap in that promise — no
+> feature creep, no nice-to-haves.
+
+#### 15.1: Threat Model Document (P0 — prerequisite for everything else)
+
+Without a formal threat model, all security measures are ad-hoc guesses.
+
+- [ ] **`docs/threat-model.md`**: Define trust boundaries, adversary capabilities, and attack surfaces
+  - Who are the adversaries? (malicious user, compromised AI model, network attacker, platform operator)
+  - What are the trust boundaries? (user ↔ SafeClaw, SafeClaw ↔ AI model, SafeClaw ↔ TEE, SafeClaw ↔ channel platform)
+  - What attacks are explicitly out of scope? (e.g., physical access to host)
+  - Map each existing security module to the specific attack vectors it defends against
+- [ ] **Annotate each leakage module** with the threat-model section it addresses (code comments linking to doc)
+- [ ] **Identify uncovered vectors**: List attack paths that no current module defends
+
+#### 15.2: Pluggable PII Classifier Architecture (P0 — fixes false sense of security)
+
+The regex-only classifier misses semantic PII (addresses in natural language, passwords
+in context, financial info in prose). This is the weakest link in the privacy chain.
+
+- [ ] **`ClassifierBackend` trait**: Pluggable classification interface
+  ```rust
+  #[async_trait]
+  pub trait ClassifierBackend: Send + Sync {
+      async fn classify(&self, text: &str) -> Vec<PiiClassification>;
+      fn confidence_floor(&self) -> f64; // minimum confidence this backend can guarantee
+  }
+  ```
+- [ ] **`RegexBackend`**: Wrap current `Classifier` as one backend (fast, high-precision, low-recall)
+- [ ] **`SemanticBackend`**: Wrap current `SemanticAnalyzer` as second backend
+- [ ] **`LlmBackend`** (behind feature flag `llm-classifier`): Call local or remote LLM for classification
+  - Structured output prompt: "Identify all PII in this text, return JSON array"
+  - Use a3s-code local service (Phase 11) or direct API call
+  - Configurable: which model, max latency, fallback to regex on timeout
+- [ ] **`CompositeClassifier`**: Chain multiple backends, merge results, deduplicate by span overlap
+  - Default chain: Regex → Semantic → (optional) LLM
+  - Union of all findings; highest confidence wins on overlap
+- [ ] **Explicit accuracy labeling**: `ClassificationResult` includes `backend: String` field so audit log shows which classifier caught it
+- [ ] **False-negative documentation**: README clearly states regex-only mode limitations
+
+#### 15.3: Stateful Privacy Gate — Cumulative Leakage Tracking (P1)
+
+Current `PrivacyGate` is stateless per-message. An attacker can leak PII across
+multiple messages ("I live in..." + "...Chaoyang District" + "...Wangjing SOHO").
+
+- [ ] **`SessionPrivacyContext`**: Per-session accumulator of disclosed PII
+  - Track: which PII types disclosed, total information bits estimated, disclosure timeline
+  - Persist in `SessionIsolation` (already per-session)
+- [ ] **Cumulative risk scoring**: `PrivacyGate` consults session context before deciding
+  - Single message with email = Normal → ProcessLocal
+  - Same session already disclosed name + phone + address = escalate to RequireConfirmation or Reject
+- [ ] **Configurable thresholds**: `privacy.cumulative_risk_limit` in config
+  - Number of distinct PII types per session before escalation
+  - Information entropy budget per session (research-grade, optional)
+- [ ] **Session risk reset**: Explicit user action or session expiry clears accumulated risk
+
+#### 15.4: Taint Propagation Completeness (P1 — fixes broken data flow tracking)
+
+Taint labels are assigned at input but lost during internal transformations.
+
+- [ ] **Taint propagation through memory layers**:
+  - `Resource` (L1) carries `taint_labels: HashSet<TaintLabel>` from input classification
+  - `Artifact` (L2) inherits union of source Resources' taint labels during extraction
+  - `Insight` (L3) inherits union of source Artifacts' taint labels during synthesis
+- [ ] **Taint propagation through AI model responses**:
+  - If input message has taint T, the model's response inherits taint T (conservative)
+  - `OutputSanitizer` checks taint labels on outbound messages, not just PII regex
+- [ ] **Taint merge rules**: When data from multiple sources combines:
+  - Union of all taint labels (conservative default)
+  - `TaintLabel::max_sensitivity()` determines the combined sensitivity level
+- [ ] **Taint audit trail**: `AuditEvent` includes taint propagation chain (source → current)
+
+#### 15.5: Replace Custom Key Derivation with HKDF (P0 — crypto fix)
+
+`derive_session_key()` uses raw `SHA-256(shared || local_pub || remote_pub)`.
+This is non-standard and unreviewed.
+
+- [ ] **Replace with HKDF-SHA256** (RFC 5869):
+  ```rust
+  use hkdf::Hkdf;
+  use sha2::Sha256;
+
+  fn derive_session_key(shared: &[u8], local_pub: &[u8], remote_pub: &[u8]) -> [u8; KEY_SIZE] {
+      let salt = [local_pub, remote_pub].concat();
+      let hkdf = Hkdf::<Sha256>::new(Some(&salt), shared);
+      let mut key = [0u8; KEY_SIZE];
+      hkdf.expand(b"safeclaw-session-v1", &mut key)
+          .expect("HKDF expand failed — invalid length");
+      key
+  }
+  ```
+- [ ] **Add protocol version binding**: Info string includes protocol version to prevent cross-version key reuse
+- [ ] **Forward secrecy**: Use ephemeral X25519 keys per session (not reusable secrets)
+  - Replace `ReusableSecret` with `EphemeralSecret` in session handshake
+  - Long-term `KeyPair` used only for identity/signing, not key exchange
+- [ ] **Zeroize sensitive material**: Derive `zeroize::Zeroize` on `SecretKey`, `SessionKey`, shared secret intermediates
+
+#### 15.6: Unified Channel Authentication Middleware (P1)
+
+Each of the 7 channel adapters implements its own auth logic. No shared abstraction,
+no unified audit trail for auth failures.
+
+- [ ] **`ChannelAuth` trait**:
+  ```rust
+  #[async_trait]
+  pub trait ChannelAuth: Send + Sync {
+      async fn verify_request(&self, headers: &HeaderMap, body: &[u8]) -> Result<AuthResult>;
+  }
+
+  pub enum AuthResult {
+      Verified { identity: String },
+      Rejected { reason: String },
+  }
+  ```
+- [ ] **Extract auth logic** from each adapter into standalone `ChannelAuth` implementations:
+  - `HmacSha256Auth` (Slack, Feishu, DingTalk — parameterized by header name and secret)
+  - `Ed25519Auth` (Discord)
+  - `TokenAuth` (Telegram — bot token in URL path)
+  - `AesCbcAuth` (WeCom — decrypt + verify)
+- [ ] **Auth middleware layer**: Axum middleware that runs `ChannelAuth::verify_request()` before handler
+  - Unified auth failure logging → `AuditEvent` with `LeakageVector::AuthFailure`
+  - Rate limiting on auth failures per channel
+- [ ] **`ChannelAdapter` trait update**: Add `fn auth(&self) -> &dyn ChannelAuth` method
+
+#### 15.7: Bounded State Management and Secure Erasure (P1)
+
+`Arc<RwLock<HashMap>>` everywhere with no capacity limits, no eviction, no secure cleanup.
+
+- [ ] **Capacity limits on all in-memory stores**:
+  - `SessionManager`: max concurrent sessions (configurable, default 1000)
+  - `AuditLog`: already has ring buffer — good ✅
+  - `PersonaStore`, `EventStore`, `SettingsStore`: max entries with LRU eviction
+  - `TaintTracker`: max tracked sessions, evict oldest on overflow
+- [ ] **`zeroize` on sensitive types**:
+  - `#[derive(Zeroize, ZeroizeOnDrop)]` on: `SecretKey`, session keys, API keys in config, PII matched text
+  - `InboundMessage.content` and `OutboundMessage.content` implement `Zeroize`
+  - Audit: grep all `String` fields that may hold PII, add zeroize
+- [ ] **Lock granularity improvement** (targeted, not wholesale rewrite):
+  - `SessionManager`: Replace `RwLock<HashMap<K, V>>` with `DashMap<K, V>` for per-key locking
+  - `TaintTracker`: Same — per-session lock instead of global
+  - Keep `RwLock` for stores with low contention (PersonaStore, SettingsStore)
+- [ ] **Core dump protection**: `prctl(PR_SET_DUMPABLE, 0)` on Linux at startup (behind feature flag)
+
+#### 15.8: TEE Graceful Degradation with Explicit Security Level (P2)
+
+When TEE is unavailable, `ProcessInTee` silently degrades. Users don't know their
+security level dropped.
+
+- [ ] **`SecurityLevel` enum** exposed in API responses:
+  ```rust
+  pub enum SecurityLevel {
+      TeeHardware,    // SEV-SNP / TDX active, memory encrypted
+      VmIsolation,    // Running in VM but no hardware TEE
+      ProcessOnly,    // No VM, no TEE — application security only
+  }
+  ```
+- [ ] **`GET /health`** includes `security_level` field
+- [ ] **`GET /api/v1/gateway/status`** includes `security_level` and `tee_available`
+- [ ] **Policy engine respects security level**:
+  - If policy says `ProcessInTee` but `security_level == ProcessOnly`:
+    - `HighlySensitive` / `Critical` PII → `Reject` (not silent downgrade)
+    - `Sensitive` PII → `RequireConfirmation` with explicit warning
+    - `Normal` PII → `ProcessLocal` (acceptable degradation)
+  - Configurable: `tee.fallback_policy = "reject" | "warn" | "allow"` in config
+- [ ] **Startup warning**: Log `WARN` if TEE expected but not detected
+
+#### 15.9: Architectural Prompt Injection Defense (P2)
+
+Heuristic detection is a losing game. Defense should be structural.
+
+- [ ] **Structured message format**: Separate user content from system instructions at the type level
+  ```rust
+  pub enum MessageSegment {
+      System { content: String, immutable: bool },
+      User { content: String, taint: HashSet<TaintLabel> },
+      Tool { content: String, tool_name: String },
+  }
+  ```
+- [ ] **Segment-aware sanitization**: `InjectionDetector` only scans `User` segments
+- [ ] **Output attribution**: Model responses tagged with which input segments influenced them (best-effort, via prompt engineering)
+- [ ] **Canary token injection**: Insert unique tokens in system prompts, detect if they appear in model output (indicates prompt leakage)
+- [ ] **Keep heuristic detector**: As defense-in-depth layer, not primary defense
+
+#### 15.10: Memory System Upgrade — From Log to Actual Memory (P2)
+
+Current L1→L2→L3 pipeline is a statistical aggregator, not a memory system.
+
+- [ ] **LLM-assisted extraction** (behind feature flag `llm-memory`):
+  - After rule-based extraction, optionally call LLM: "What long-term facts should be remembered from this conversation?"
+  - Structured output → new Artifacts with `source: "llm-extraction"`
+  - Privacy gate applies to extracted facts before storage
+- [ ] **Relevance scoring upgrade**:
+  - Replace hardcoded `importance * 0.7 + recency * 0.3` with per-user learned weights
+  - Track which recalled memories were actually useful (user feedback signal)
+  - Fallback to current formula when no feedback data
+- [ ] **Cross-session memory retrieval**:
+  - When new session starts, query L2/L3 for relevant context from past sessions
+  - Relevance = embedding similarity (requires embedding model, optional) or keyword match (default)
+  - Privacy gate re-evaluates before injecting historical context
+- [ ] **Memory decay and forgetting**:
+  - Artifacts not accessed in N days (configurable) auto-archive
+  - User can explicitly "forget" specific memories via API
+  - `DELETE /api/v1/memory/artifacts/:id` with secure erasure (zeroize)
+
+### Phase 15 Execution Priority
+
+```
+P0 (do first — security correctness):
+  15.1  Threat Model Document
+  15.5  HKDF Key Derivation
+  15.2  Pluggable PII Classifier
+
+P1 (do next — close real attack vectors):
+  15.3  Stateful Privacy Gate
+  15.4  Taint Propagation
+  15.6  Channel Auth Middleware
+  15.7  Bounded State + Secure Erasure
+
+P2 (do after — defense in depth):
+  15.8  TEE Graceful Degradation
+  15.9  Structural Injection Defense
+  15.10 Memory System Upgrade
+```
+
 ## API Reference
 
 SafeClaw exposes **33 REST endpoints + 1 WebSocket** organized into 8 modules. All responses use JSON. Error responses follow `{"error": {"code": "...", "message": "..."}}` format. CORS is enabled for all origins by default.

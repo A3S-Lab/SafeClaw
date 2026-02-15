@@ -3,6 +3,9 @@
 //! Scans AI-generated output for tainted data (including encoded variants)
 //! and auto-redacts before sending to the user. Generates audit events
 //! for any blocked leakage attempts.
+//!
+//! **Threat model**: Defends against A2 (compromised AI model) at AS-3 (model interaction).
+//! See `docs/threat-model.md` §4 AS-3, §5.
 
 use super::audit::{AuditEvent, AuditSeverity, LeakageVector};
 use super::taint::{TaintMatch, TaintRegistry};

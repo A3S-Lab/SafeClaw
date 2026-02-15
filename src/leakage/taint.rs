@@ -2,6 +2,9 @@
 //!
 //! Marks sensitive input data with unique taint IDs and generates
 //! known variants (base64, hex, URL-encoded) for detection in outputs.
+//!
+//! **Threat model**: Defends against A2 (compromised AI model) at AS-3 and AS-4.
+//! See `docs/threat-model.md` §4 AS-3/AS-4, §5.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;

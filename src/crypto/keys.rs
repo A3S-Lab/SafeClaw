@@ -1,4 +1,7 @@
 //! Key management for secure communication
+//!
+//! **Threat model**: Defends against A3 (network attacker) and A5 (insider) at AS-5.
+//! See `docs/threat-model.md` §4 AS-5, §5.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
