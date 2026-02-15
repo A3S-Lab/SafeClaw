@@ -266,6 +266,12 @@ async fn run_gateway(
         .tee_enabled(tee_enabled)
         .build()?;
 
+    // Build agent state and wire engine into gateway before start
+    let agent_state = build_agent_state(models.clone()).await?;
+    gateway
+        .set_agent_engine(agent_state.engine.clone())
+        .await;
+
     gateway.start().await?;
 
     // Build audit state from gateway's shared log and alert monitor
@@ -274,8 +280,7 @@ async fn run_gateway(
         alert_monitor: Some(gateway.alert_monitor().clone()),
     };
 
-    // Build agent router with CORS for cross-origin UI access
-    let agent_state = build_agent_state(models.clone()).await?;
+    // Build remaining routers with CORS for cross-origin UI access
     let events_state = build_events_state().await?;
     let settings_state = build_settings_state(&settings_config, &models);
     let personas_state = build_personas_state().await?;
@@ -334,6 +339,12 @@ async fn run_serve(
             .build()?,
     );
 
+    // Build agent state and wire engine into gateway before start
+    let agent_state = build_agent_state(config.models.clone()).await?;
+    gateway
+        .set_agent_engine(agent_state.engine.clone())
+        .await;
+
     gateway.start().await?;
 
     // Build audit state from gateway's shared log and alert monitor
@@ -341,9 +352,6 @@ async fn run_serve(
         log: gateway.global_audit_log().clone(),
         alert_monitor: Some(gateway.alert_monitor().clone()),
     };
-
-    // Build HTTP API router for a3s-gateway to proxy to, merged with agent router
-    let agent_state = build_agent_state(config.models.clone()).await?;
     let events_state = build_events_state().await?;
     let settings_state = build_settings_state(&config, &config.models);
     let personas_state = build_personas_state().await?;

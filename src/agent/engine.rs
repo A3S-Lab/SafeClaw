@@ -607,6 +607,69 @@ impl AgentEngine {
     }
 
     // =========================================================================
+    // Channel message processing (non-WebSocket)
+    // =========================================================================
+
+    /// Generate a text response for a channel message.
+    ///
+    /// Unlike `spawn_generation` (browser WebSocket), this method collects all
+    /// streaming events and returns the final text. Used by the Gateway's event
+    /// processor to handle messages from Telegram, Slack, Discord, etc.
+    ///
+    /// If no agent session exists for the given ID, one is created with
+    /// `trust` permission mode (auto-approve all tool calls for chat channels).
+    pub async fn generate_response(
+        &self,
+        session_id: &str,
+        prompt: &str,
+    ) -> crate::Result<String> {
+        // Ensure agent session exists
+        if self.get_session(session_id).await.is_none() {
+            self.create_session(session_id, None, Some("trust".to_string()), None)
+                .await?;
+        }
+
+        // Start streaming generation
+        let (mut event_rx, _join_handle) = self
+            .session_manager
+            .generate_streaming(session_id, prompt)
+            .await
+            .map_err(|e| {
+                crate::Error::Gateway(format!("Failed to start generation: {}", e))
+            })?;
+
+        // Collect text from streaming events
+        let mut text = String::new();
+        while let Some(event) = event_rx.recv().await {
+            match &event {
+                AgentEvent::TextDelta { text: delta } => {
+                    text.push_str(delta);
+                }
+                AgentEvent::End {
+                    text: final_text, ..
+                } => {
+                    if !final_text.is_empty() {
+                        return Ok(final_text.clone());
+                    }
+                }
+                AgentEvent::Error { message } => {
+                    return Err(crate::Error::Gateway(format!(
+                        "Agent error: {}",
+                        message
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        if text.is_empty() {
+            Ok("I received your message but couldn't generate a response.".to_string())
+        } else {
+            Ok(text)
+        }
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 

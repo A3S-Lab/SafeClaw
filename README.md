@@ -1,16 +1,16 @@
 # SafeClaw
 
 <p align="center">
-  <strong>A3S Operating System — Main Application</strong>
+  <strong>Security Proxy for AI Agents</strong>
 </p>
 
 <p align="center">
-  <em>The central application of the A3S Agent OS — proxies message channels, orchestrates multiple a3s-code agents via A3sfile, and provides hardware-isolated execution through TEE</em>
+  <em>Lightweight security proxy that runs inside an A3S Box VM — classifies messages, detects injection attacks, sanitizes outputs, tracks data taint, and audits everything. Calls a local A3S Code agent service for LLM processing. Degrades gracefully: TEE hardware memory encryption when available, VM isolation always.</em>
 </p>
 
 <p align="center">
   <a href="#security-architecture">Security Architecture</a> •
-  <a href="#how-it-works">How It Works</a> •
+  <a href="#technical-architecture">Architecture</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#configuration">Configuration</a> •
   <a href="#roadmap">Roadmap</a>
@@ -239,26 +239,23 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 
 ## Features
 
-- **OS Main Application**: Runs inside a3s-box MicroVM as the central coordinator of the A3S Agent OS
-- **Multi-Agent Coordination**: In-process a3s-code library integration via `AgentEngine` — manages multiple concurrent agent sessions with independent models, permissions, and working directories
-- **A3sfile Orchestration**: Declares and orchestrates underlying a3s-code agents, models, tools, and collaboration topology (sequential/parallel/dag/hierarchical/dynamic)
-- **Multi-Channel Routing**: Proxies messages from 7 platforms (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) via a3s-gateway, routing to correct agent sessions using `user_id:channel_id:chat_id` composite keys
-- **Privacy Escalation**: Session-level sensitivity ratchet (Normal → Sensitive → HighlySensitive → Critical) with automatic TEE upgrade via `upgrade_to_tee()`
-- **Hardware Isolation**: Sensitive data processing in A3S Box MicroVM with TEE
-- **Automatic Classification**: Detect PII, credentials, and secrets automatically
+- **Security Proxy**: Runs inside A3S Box VM alongside a local A3S Code agent service. SafeClaw handles security; A3S Code handles LLM processing
+- **Multi-Channel Routing**: 7 platform adapters (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) with session routing via `user_id:channel_id:chat_id` composite keys
+- **Privacy Classification**: Regex + semantic + compliance (HIPAA, PCI-DSS, GDPR) PII detection via shared `a3s-privacy` library
 - **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
-- **Compliance Rule Engine**: Pre-built HIPAA, PCI-DSS, GDPR rule sets with custom rule support
-- **Unified REST API**: 34 endpoints (33 REST + 1 WebSocket) with CORS, privacy/audit/compliance APIs, webhook ingestion, consistent error format. See [API Reference](#api-reference)
-- **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
-- **Output Sanitization**: Prevent AI from leaking sensitive data in responses via taint tracking, output scanning, and tool call interception
 - **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
+- **Output Sanitization**: Scan agent responses for tainted data, auto-redact before delivery to user
+- **Injection Detection**: Block prompt injection attacks (role override, delimiter injection, encoded payloads)
 - **Tool Call Interception**: Block tool calls containing tainted data or dangerous exfiltration commands (curl, wget, nc, ssh, etc.)
-- **Leakage Audit Log**: Structured audit events for all blocked leakage attempts with severity levels and leakage vectors
-- **Session Isolation**: Strict memory isolation between users
-- **Distributed TEE**: Split-Process-Merge: Coordinator TEE (local LLM) decomposes tasks, Workers process, Validator verifies no leakage
+- **Network Firewall**: Whitelist-only outbound connections (LLM APIs only by default)
+- **Audit Pipeline**: Centralized event bus with real-time alerting (rate-based anomaly detection)
+- **TEE Graceful Degradation**: If AMD SEV-SNP → sealed storage + attestation; if not → VM isolation + application security
+- **Session Isolation**: Per-session taint registry, audit log, secure memory wipe on termination
+- **Unified REST API**: 34 endpoints (33 REST + 1 WebSocket) with CORS, privacy/audit/compliance APIs, webhook ingestion. See [API Reference](#api-reference)
+- **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
-- **Direct Agent Integration**: In-process a3s-code library integration via `AgentEngine`, replacing CLI subprocess bridging with native `SessionManager` calls, streaming `AgentEvent` translation, and multi-provider LLM support
 - **Desktop UI**: Tauri v2 + React + TypeScript native desktop application
+- **527 tests**
 
 ## Quick Start
 
@@ -298,71 +295,126 @@ safeclaw config --default
 
 > For a high-level overview of security architecture, see [Security Architecture](#security-architecture) above.
 
-### Dependency Graph (Redesigned)
+### Architecture: Lightweight Single-Binary in A3S Box VM
+
+SafeClaw is a **self-contained single binary** that always runs inside an A3S Box VM.
+It is the guest, never the host. A3S Box provides VM-level isolation; if the hardware
+supports AMD SEV-SNP, the same VM automatically becomes a TEE with hardware memory
+encryption. SafeClaw detects this at startup and enables/disables TEE features accordingly.
 
 ```
-                    a3s-privacy (shared types)
-                   /        |          \
-                  /         |           \
-a3s-gateway    safeclaw    a3s-code/security
-     ↑            |    \
-     |            |     └── a3s-transport (Transport trait)
-  discovery       |              |
-  (not dep)       └──── a3s-box-runtime (TeeRuntime)
-                              |
-                        a3s-transport
+┌──────────────────────────────────────────────────────────────────────┐
+│  Host Machine                                                        │
+│                                                                      │
+│  a3s-box (VM launcher)                                               │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │  MicroVM (libkrun)                                              │  │
+│  │                                                                  │  │
+│  │  ┌──────────────────────────────────────────────────────────┐  │  │
+│  │  │  SafeClaw (security proxy)                                │  │  │
+│  │  │  ┌──────────────┐ ┌────────────┐ ┌───────────────────┐  │  │  │
+│  │  │  │ Channel      │ │ Privacy    │ │ Taint Tracking    │  │  │  │
+│  │  │  │ Adapters (7) │ │ Classifier │ │ + Output Sanitizer│  │  │  │
+│  │  │  └──────────────┘ └────────────┘ └───────────────────┘  │  │  │
+│  │  │  ┌──────────────┐ ┌────────────┐ ┌───────────────────┐  │  │  │
+│  │  │  │ Injection    │ │ Session    │ │ Audit Event Bus   │  │  │  │
+│  │  │  │ Detector     │ │ Router     │ │ + Alerting        │  │  │  │
+│  │  │  └──────────────┘ └─────┬──────┘ └───────────────────┘  │  │  │
+│  │  │  ┌──────────────────────┘                                │  │  │
+│  │  │  │ TeeRuntime (a3s-box-core)                             │  │  │
+│  │  │  │ detect /dev/sev-guest → sealed storage / attestation  │  │  │
+│  │  │  └──────────────────────┐                                │  │  │
+│  │  └─────────────────────────┼────────────────────────────────┘  │  │
+│  │                            │ gRPC / unix socket                 │  │
+│  │  ┌─────────────────────────▼────────────────────────────────┐  │  │
+│  │  │  A3S Code (local service, separate process)               │  │  │
+│  │  │  ┌────────────┐ ┌────────────┐ ┌──────────────────────┐  │  │  │
+│  │  │  │ Agent      │ │ a3s-lane   │ │ Tool Execution       │  │  │  │
+│  │  │  │ Runtime    │ │ (priority) │ │ + LLM API Calls      │  │  │  │
+│  │  │  └────────────┘ └────────────┘ └──────────────────────┘  │  │  │
+│  │  └──────────────────────────────────────────────────────────┘  │  │
+│  │                                                                  │  │
+│  │  if AMD SEV-SNP hardware: VM memory encrypted by CPU             │  │
+│  │  if no SEV-SNP:           VM isolation only (hypervisor)         │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Key design principles:
-- **a3s-privacy**: Single source of truth for `SensitivityLevel`, `ClassificationRule`, regex patterns
-- **a3s-transport**: Unified `Transport` trait with vsock, mock implementations and shared framing protocol
-- **a3s-gateway** discovers SafeClaw via health endpoints (not config generation)
-- **a3s-code/security** is a generic security module (not SafeClaw-specific)
+### Deployment Modes
 
-### System Components
+The **same binary** runs in both modes. SafeClaw does not care how it was launched
+— it just checks `a3s-box-core` at startup to detect TEE hardware.
+
+| | Standalone (single machine) | A3S OS (K8s cluster) |
+|---|---|---|
+| **VM launcher** | `a3s-box run safeclaw` (CLI) | kubelet + `a3s-box-shim` (CRI) |
+| **TEE** | Auto-detect hardware | Auto-detect hardware |
+| **Ingress** | SafeClaw listens directly | A3S Gateway routes traffic (app-agnostic) |
+| **Scaling** | Single instance | K8s HPA (A3S OS doesn't know it's SafeClaw) |
+| **Audit** | In-memory bus | Optionally → a3s-event (NATS) |
+| **Scheduling** | None | Optionally → a3s-cron |
+
+> A3S OS is **application-agnostic**. It only provides two things: A3S Gateway
+> (traffic routing) and A3S Box (VM runtime management). It does not know or care
+> whether the workload is SafeClaw, OpenClaw, or anything else.
+
+### Security Guarantees (Defense in Depth)
+
+All three layers are always active. Layer 3 degrades gracefully based on hardware.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                  A3S Gateway (a3s-gateway)                            │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                 Channel Adapters (via Gateway)                  │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
-│  │  │ Telegram │ │  Feishu  │ │ DingTalk │ │    WeCom     │   │   │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │   │
-│  │  │  Slack   │ │ Discord  │ │ WebChat  │ │   Custom     │   │   │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │   │
-│  └───────┼────────────┼────────────┼──────────────┼───────────┘   │
-│          └────────────┴────────────┴──────────────┘               │
-│                              │                                     │
-│  ┌───────────────────────────▼───────────────────────────────┐   │
-│  │                   Session Router                           │   │
-│  │  - Route messages to appropriate TEE sessions              │   │
-│  │  - Handle multi-agent routing                              │   │
-│  │  - Manage session lifecycle                                │   │
-│  └───────────────────────────┬───────────────────────────────┘   │
-│                              │                                     │
-│  ┌───────────────────────────▼───────────────────────────────┐   │
-│  │              Privacy Classifier (a3s-privacy)              │   │
-│  │  - Shared classification rules (single source of truth)    │   │
-│  │  - Route sensitive data to TEE                             │   │
-│  │  - Handle encryption/decryption                            │   │
-│  └───────────────────────────┬───────────────────────────────┘   │
-└──────────────────────────────┼────────────────────────────────────┘
-                               │ a3s-transport (vsock port 4091)
-┌──────────────────────────────▼────────────────────────────────────┐
-│                    TEE Environment (A3S Box)                       │
-│  ┌─────────────────────────────────────────────────────────────┐  │
-│  │                    Secure Agent Runtime                      │  │
-│  │  ┌─────────────────┐  ┌─────────────────────────────────┐   │  │
-│  │  │  A3S Code Agent │  │     Secure Data Store           │   │  │
-│  │  │  + Security     │  │  - Encrypted credentials        │   │  │
-│  │  │    Guards       │  │  - Private conversation history │   │  │
-│  │  │  (a3s-privacy)  │  │  - Sensitive user data          │   │  │
-│  │  └─────────────────┘  └─────────────────────────────────┘   │  │
-│  └─────────────────────────────────────────────────────────────┘  │
-│                         MicroVM (Hardware Isolated)                │
-└────────────────────────────────────────────────────────────────────┘
+Layer 1: VM Isolation (always, a3s-box)
+  SafeClaw runs in MicroVM, never on bare host
+  Host compromise does not expose SafeClaw memory (hypervisor boundary)
+
+Layer 2: Application Security (always, SafeClaw built-in)
+  Privacy classification, taint tracking, output sanitization
+  Injection detection, network firewall, audit logging
+  Session isolation with secure memory wipe
+
+Layer 3: Hardware TEE (when available, AMD SEV-SNP)
+  VM memory encrypted by CPU — even hypervisor cannot read
+  Sealed credential storage (bound to CPU + firmware measurement)
+  Remote attestation (clients can verify SafeClaw is in genuine TEE)
+  Graceful degradation: if no SEV-SNP → Layer 1 + Layer 2 still active
+```
+
+### Dependency Graph
+
+```
+safeclaw (security proxy, single binary)
+├── a3s-privacy     (classification library, compile-time)
+├── a3s-box-core    (TEE self-detection, sealed storage, RA-TLS)
+└── tonic / reqwest  (gRPC / HTTP client to local a3s-code service)
+
+a3s-code (agent service, separate process in same VM)
+├── a3s-code        (agent runtime)
+├── a3s-lane        (priority queue, concurrency control)
+└── a3s-privacy     (execution-time guards)
+
+NOT depended on by SafeClaw:
+  a3s-code          → separate process, called via local service
+  a3s-box-runtime   → host-side VM launcher, SafeClaw is the guest
+  a3s-gateway       → K8s Ingress, SafeClaw doesn't know about it
+  a3s-event/cron     → optional platform services, config-driven
+```
+
+### Message Flow
+
+```
+Standalone:
+  User (Telegram) → SafeClaw (direct)
+
+A3S OS:
+  User (Telegram) → A3S Gateway (Ingress) → SafeClaw Pod
+
+Both modes, same internal flow:
+  message_in
+    → injection_detect()          block attacks
+    → classify()                  sensitivity level + taint registry
+    → a3s_code_client.process()   gRPC/unix socket to local a3s-code
+    → sanitize(response)          redact tainted data via taint registry
+    → channel.send(reply)
 ```
 
 ## Security Design Details
@@ -727,224 +779,35 @@ The taint tracking system follows sensitive data through all transformations:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Distributed TEE Architecture (Advanced)
+### Single-VM Security Model
 
-For maximum security, SafeClaw supports a distributed architecture where sensitive data is split across multiple isolated TEE instances, coordinated by a local LLM running inside a trusted TEE.
-
-#### Core Concept: Split-Process-Merge
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Distributed TEE Processing Model                      │
-│                                                                          │
-│  User Input: "Use my card 4111-1111-1111-1111 to pay $500 to John"      │
-│      │                                                                   │
-│      ▼                                                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Coordinator TEE (Local LLM - e.g., Qwen3 8B)                    │    │
-│  │  Role: SPLIT - Sanitize and decompose task                       │    │
-│  │                                                                  │    │
-│  │  1. Identify sensitive data: card number, amount, recipient     │    │
-│  │  2. Create sanitized sub-tasks:                                 │    │
-│  │     Task A: "Validate payment format: $500"                     │    │
-│  │     Task B: "Look up recipient: John"                           │    │
-│  │     Task C: "Process card: ****1111" (partial, in secure TEE)   │    │
-│  │  3. Assign tasks to appropriate execution environments          │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│      │                    │                    │                         │
-│      ▼                    ▼                    ▼                         │
-│  ┌──────────┐      ┌──────────────┐      ┌──────────────────┐           │
-│  │ Worker   │      │   Worker     │      │    Worker        │           │
-│  │ TEE #1   │      │   REE #1     │      │    TEE #2        │           │
-│  │          │      │              │      │    (High Sec)    │           │
-│  │ Task A   │      │   Task B     │      │    Task C        │           │
-│  │ Validate │      │   Lookup     │      │    Card Process  │           │
-│  │ $500     │      │   "John"     │      │    Full card #   │           │
-│  │          │      │              │      │    in isolated   │           │
-│  │ No card  │      │   No card    │      │    memory        │           │
-│  │ access   │      │   access     │      │                  │           │
-│  └────┬─────┘      └──────┬───────┘      └────────┬─────────┘           │
-│       │                   │                       │                      │
-│       └───────────────────┴───────────────────────┘                      │
-│                           │                                              │
-│                           ▼                                              │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Coordinator TEE (Local LLM)                                     │    │
-│  │  Role: MERGE - Aggregate results                                 │    │
-│  │                                                                  │    │
-│  │  1. Collect results from all workers                            │    │
-│  │  2. Verify no sensitive data in worker outputs                  │    │
-│  │  3. Compose final response to user                              │    │
-│  │  4. Sanitize output before sending                              │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│      │                                                                   │
-│      ▼                                                                   │
-│  Safe Output: "Payment of $500 to John completed (card ****1111)"       │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Agent Roles and Execution Environments
-
-SafeClaw defines different agent roles with appropriate execution environments:
-
-| Role | Environment | Access Level | Responsibilities |
-|------|-------------|--------------|------------------|
-| **Coordinator** | TEE (Local LLM) | Full sensitive data | Split tasks, merge results, sanitize I/O |
-| **Secure Worker** | TEE (Cloud LLM) | Partial sensitive data | Process tasks requiring some sensitive context |
-| **General Worker** | REE (Cloud LLM) | Sanitized data only | Process non-sensitive tasks |
-| **Validator** | TEE (Local LLM) | Output only | Verify no data leakage in outputs |
+SafeClaw runs in a single A3S Box VM. The VM is either TEE (if AMD SEV-SNP hardware
+is present) or REE (VM isolation only). There is no multi-VM routing — all processing
+happens within the same VM.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    Agent Role Architecture                               │
+│                    Single-VM Security Model                              │
 │                                                                          │
+│  A3S Box VM (TEE if hardware supports, REE otherwise)                   │
 │  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    TEE Environment (Trusted)                     │    │
-│  │                                                                  │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │  Coordinator Agent (Local LLM)                           │    │    │
-│  │  │  - Runs entirely inside TEE                              │    │    │
-│  │  │  - Has access to ALL sensitive data                      │    │    │
-│  │  │  - Performs: sanitization, task splitting, aggregation   │    │    │
-│  │  │  - NEVER sends sensitive data to external APIs           │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  │                                                                  │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │  Secure Worker Agents (Cloud LLM via API)                │    │    │
-│  │  │  - Run in isolated TEE sessions                          │    │    │
-│  │  │  - Receive PARTIAL sensitive data (need-to-know basis)   │    │    │
-│  │  │  - Network restricted to LLM API whitelist               │    │    │
-│  │  │  - Output sanitized before returning to Coordinator      │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  │                                                                  │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │  Validator Agent (Local LLM)                             │    │    │
-│  │  │  - Independent verification of outputs                   │    │    │
-│  │  │  - Checks for data leakage before user delivery          │    │    │
-│  │  │  - Can BLOCK suspicious outputs                          │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    REE Environment (Untrusted)                   │    │
-│  │                                                                  │    │
-│  │  ┌─────────────────────────────────────────────────────────┐    │    │
-│  │  │  General Worker Agents (Cloud LLM)                       │    │    │
-│  │  │  - Run in regular (non-TEE) environment                  │    │    │
-│  │  │  - Receive ONLY sanitized, non-sensitive data            │    │    │
-│  │  │  - Used for: general knowledge, formatting, translation  │    │    │
-│  │  │  - Lower cost, higher performance                        │    │    │
-│  │  └─────────────────────────────────────────────────────────┘    │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Data Flow Example
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Example: "Summarize my medical records and send to Dr. Smith"          │
-│                                                                          │
-│  Step 1: Coordinator (TEE + Local LLM) receives full request            │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  Input: Medical records (highly sensitive)                       │    │
-│  │  Action: Analyze and split into sub-tasks                       │    │
-│  │                                                                  │    │
-│  │  Sub-task A: "Summarize document structure" → General Worker    │    │
-│  │              Data: [document has 5 sections, 10 pages]          │    │
-│  │              Sensitivity: NONE (metadata only)                  │    │
-│  │                                                                  │    │
-│  │  Sub-task B: "Extract key medical terms" → Secure Worker TEE    │    │
-│  │              Data: [anonymized: "Patient has condition X"]      │    │
-│  │              Sensitivity: MEDIUM (anonymized)                   │    │
-│  │                                                                  │    │
-│  │  Sub-task C: "Format for Dr. Smith" → General Worker            │    │
-│  │              Data: [template formatting only]                   │    │
-│  │              Sensitivity: NONE                                  │    │
-│  │                                                                  │    │
-│  │  Sub-task D: "Include patient identifiers" → Coordinator ONLY   │    │
-│  │              Data: [name, DOB, SSN - NEVER leaves TEE]          │    │
-│  │              Sensitivity: HIGH (handled locally)                │    │
+│  │  SafeClaw (security proxy)                                       │    │
+│  │  ├── classify(input)     → sensitivity level + taint registry   │    │
+│  │  ├── injection_detect()  → block prompt injection attacks       │    │
+│  │  ├── call a3s-code       → agent processes request              │    │
+│  │  ├── sanitize(output)    → redact any tainted data              │    │
+│  │  └── audit(event)        → log everything                       │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                          │
-│  Step 2: Workers process their sanitized sub-tasks                      │
-│  Step 3: Coordinator merges results, adds sensitive identifiers         │
-│  Step 4: Validator checks final output for leakage                      │
-│  Step 5: Safe output delivered to user                                  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Local LLM Requirements
-
-The Coordinator and Validator agents require a local LLM running inside TEE:
-
-| Model | Size | TEE Memory | Use Case |
-|-------|------|------------|----------|
-| Qwen3 4B | ~8GB | 12GB TEE | Basic coordination, low resource |
-| Qwen3 8B | ~16GB | 24GB TEE | **Recommended** for most use cases |
-| Qwen3 14B | ~28GB | 32GB TEE | Complex task decomposition |
-| Qwen3 32B | ~64GB | 80GB TEE | Maximum capability |
-| DeepSeek-V3-Lite | ~16GB | 24GB TEE | Strong reasoning capability |
-| DeepSeek-R1-Distill-Qwen-7B | ~14GB | 20GB TEE | Reasoning-focused, efficient |
-| ChatGLM4 9B | ~18GB | 24GB TEE | Good Chinese language support |
-| Yi-1.5 9B | ~18GB | 24GB TEE | Balanced multilingual performance |
-
-> **Note**: Qwen3 series is recommended for its superior instruction following, tool calling, and multilingual capabilities. DeepSeek-R1-Distill models are excellent for reasoning-heavy tasks.
-
-```toml
-# Configuration for distributed TEE mode
-[tee.distributed]
-enabled = true
-coordinator_model = "qwen3-8b"
-coordinator_quantization = "q4_k_m"  # Reduce memory usage
-
-[tee.distributed.workers]
-secure_worker_count = 2
-general_worker_count = 4
-secure_worker_env = "tee"
-general_worker_env = "ree"
-```
-
-#### Security Properties
-
-| Property | How It's Achieved |
-|----------|-------------------|
-| **Data Minimization** | Each worker only sees data necessary for its task |
-| **Isolation** | Workers run in separate TEE/REE instances |
-| **No Single Point of Leakage** | Sensitive data split across multiple components |
-| **Defense in Depth** | Coordinator + Validator both check for leakage |
-| **Auditability** | All data flows logged (sanitized) |
-
-#### Comparison: Single TEE vs Distributed TEE
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Architecture Comparison                               │
+│  If TEE (SEV-SNP):                                                      │
+│  ├── VM memory encrypted by CPU — hypervisor cannot read                │
+│  ├── Sealed credential storage (bound to hardware measurement)         │
+│  └── Remote attestation (clients can verify SafeClaw is genuine TEE)   │
 │                                                                          │
-│  Single TEE Mode:                                                        │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  User → [TEE: A3S Code + Cloud LLM API] → User                   │    │
-│  │                                                                  │    │
-│  │  Pros: Simple, low latency                                      │    │
-│  │  Cons: All data exposed to single agent, API leakage risk       │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  Distributed TEE Mode:                                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  User → [TEE: Coordinator (Local LLM)]                           │    │
-│  │              ├→ [TEE: Secure Worker] (partial data)             │    │
-│  │              ├→ [REE: General Worker] (sanitized data)          │    │
-│  │              └→ [TEE: Validator (Local LLM)]                    │    │
-│  │         → User                                                   │    │
-│  │                                                                  │    │
-│  │  Pros: Maximum security, no single point of failure             │    │
-│  │  Cons: Higher latency, more resources, complex orchestration    │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  Recommendation:                                                         │
-│  - Normal use: Single TEE mode (good security, good performance)        │
-│  - High security: Distributed TEE mode (maximum security)               │
-│  - Configurable per-request based on sensitivity level                  │
+│  If REE (no SEV-SNP):                                                   │
+│  ├── VM isolation — SafeClaw memory isolated from host by hypervisor   │
+│  ├── All application security still active (classify, sanitize, audit)  │
+│  └── No hardware memory encryption, no sealed storage                  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1425,6 +1288,10 @@ Extracted duplicated privacy types into shared `a3s-privacy` crate. All 3 consum
 
 #### Phase 3.25: Direct a3s-code Library Integration (P0) ✅
 
+> **Transitional**: In-process `AgentEngine` will be replaced by a gRPC/unix socket
+> client to the local A3S Code service in Phase 11. SafeClaw should not embed a3s-code
+> — A3S Code runs as a separate process inside the same A3S Box VM.
+
 Replaced CLI subprocess bridging (launcher.rs + bridge.rs + NDJSON protocol) with direct in-process a3s-code library calls via `AgentEngine`.
 
 - [x] **`AgentEngine`**: Wraps `SessionManager`, manages per-session UI state, translates `AgentEvent` → `BrowserIncomingMessage`
@@ -1453,14 +1320,25 @@ Replaced TOML config generation with service discovery endpoint.
 - [x] **Delete** `gateway/integration.rs` (TOML string concatenation replaced with `ServiceDescriptor`)
 - [x] **Routing rules** owned by gateway config, not generated by SafeClaw
 
-### Phase 4: TEE Real Communication (depends on Phase 3.2) ✅
+### Phase 4: TEE Communication Layer (depends on Phase 3.2) ✅
 
-Replace `MockTransport` with real communication to A3S Box MicroVM via RA-TLS. The A3S Box guest-side infrastructure (RA-TLS attestation server, SNP reports, sealed storage) is production-ready — the gap is on the SafeClaw (host) side. See [`docs/tee-real-communication-design.md`](docs/tee-real-communication-design.md) for full design.
+> **Architecture correction**: Phase 4 was originally designed with SafeClaw as a
+> host-side process that boots and manages VMs. This is **incorrect** — SafeClaw is
+> the guest inside an A3S Box VM. Phase 11 will refactor:
+> - **Delete `TeeOrchestrator`** — SafeClaw doesn't boot VMs, `a3s-box` does
+> - **Delete `a3s-box-runtime` dependency** — that's the host-side VM management library
+> - **Replace with `TeeRuntime`** — self-detection: am I in a TEE? Enable sealed storage if yes
+> - **Keep `a3s-box-core`** — TEE self-detection, sealed storage API, RA-TLS
+> - **Keep `RaTlsChannel`** — for verifying external TEE services
+
+Implemented RA-TLS communication and TEE lifecycle management. See [`docs/tee-real-communication-design.md`](docs/tee-real-communication-design.md) for design. The code works but the host/guest role assumption will be corrected in Phase 11.
 
 #### Phase 4.1: Add `a3s-box-runtime` Dependency (P0) ✅
 
 - [x] **Add `a3s-box-runtime` and `a3s-box-core`** to `safeclaw/Cargo.toml`
 - [x] **Update `TeeConfig`** with new fields: `shim_path`, `allow_simulated`, `secrets`, `workspace_dir`, `socket_dir`
+
+> ⚠️ `a3s-box-runtime` will be removed in Phase 11 — SafeClaw is the guest, not the host.
 
 #### Phase 4.2: TeeOrchestrator Module (P0) ✅
 
@@ -1475,6 +1353,8 @@ Central coordinator for TEE lifecycle — boots MicroVM, verifies attestation, i
   - [x] `shutdown()` — Terminate all sessions, stop VM
   - [x] `is_ready()` — Check if VM is booted and TEE is verified
 - [x] **Lazy VM boot** — MicroVM starts on first `upgrade_to_tee()`, not at SafeClaw startup
+
+> ⚠️ `TeeOrchestrator` will be replaced by `TeeRuntime` (self-detection) in Phase 11.
 
 #### Phase 4.3: RA-TLS Channel + Guest Endpoint (P0) ✅
 
@@ -1535,39 +1415,23 @@ Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privac
   - [x] Severity levels: Info, Warning, High, Critical
   - [x] Leakage vectors: OutputChannel, ToolCall, DangerousCommand, NetworkExfil, FileExfil
 
-### Phase 6: Distributed TEE Architecture 📋
+### Phase 6: Local LLM in TEE 📋
 
-Split-Process-Merge architecture with local LLM coordination. A3S Gateway handles inter-service routing and load balancing across TEE workers.
+Local model inference inside TEE for fully offline, air-gapped privacy.
 
-- [ ] **Local LLM Integration**:
+> **Note**: The distributed worker architecture (coordinator/worker/validator pattern,
+> multi-pod scaling) is handled by A3S OS — not SafeClaw. SafeClaw is a single binary.
+> A3S OS can run multiple SafeClaw instances behind A3S Gateway for horizontal scaling.
+
+- [ ] **Local LLM Integration** (via a3s-power):
   - [ ] A3S Box support for local LLM (Qwen3, DeepSeek-R1, ChatGLM, Yi)
   - [ ] Quantization support (Q4, Q8) for memory efficiency
   - [ ] TEE-optimized inference runtime
-  - [ ] Model integrity verification (hash check)
-- [ ] **Coordinator Agent**:
-  - [ ] Task decomposition and sanitization
-  - [ ] Sensitive data identification and splitting
-  - [ ] Sub-task assignment to appropriate workers
-  - [ ] Result aggregation and final sanitization
-- [ ] **Worker Pool Management** (load balanced via a3s-gateway):
-  - [ ] Secure Worker pool (TEE environment)
-  - [ ] General Worker pool (REE environment)
-  - [ ] Dynamic worker allocation based on task sensitivity
-  - [ ] Worker health monitoring and failover (a3s-gateway health checks)
-- [ ] **Inter-TEE Communication** (via `a3s-transport`):
-  - [ ] Secure channels between Coordinator and Workers
-  - [ ] Data minimization enforcement (need-to-know basis)
-  - [ ] Cross-TEE attestation verification
-- [ ] **Validator Agent**:
-  - [ ] Independent output verification (separate TEE)
-  - [ ] Leakage detection before user delivery
-  - [ ] Anomaly detection for suspicious outputs
-  - [ ] Veto power for blocking unsafe responses
-- [ ] **Orchestration**:
-  - [ ] Task dependency graph management
-  - [ ] Parallel execution optimization
-  - [ ] Timeout and retry handling
-  - [ ] Audit trail for all data flows
+  - [ ] Model integrity verification (hash check before loading)
+- [ ] **Offline Mode**:
+  - [ ] No outbound network connections required
+  - [ ] All classification + sanitization runs locally
+  - [ ] Network firewall blocks all egress by default
 
 ### Phase 7: Advanced Privacy 🚧
 
@@ -1594,22 +1458,21 @@ Enhanced privacy classification and protection:
 
 ### Phase 8: Production Hardening 📋
 
-Production readiness and deployment:
+Production readiness:
 
 - [ ] **Security Audit**:
   - [ ] Third-party security review
   - [ ] Penetration testing
   - [ ] Cryptographic implementation audit
 - [ ] **Performance Optimization**:
-  - [ ] TEE communication latency optimization
-  - [ ] Batch processing for high throughput
-- [ ] **Deployment** (via a3s-gateway):
-  - [ ] Docker images with TEE support
-  - [ ] Kubernetes deployment with confidential computing (a3s-gateway as ingress)
-  - [ ] Helm charts (includes a3s-gateway + SafeClaw)
+  - [ ] TEE sealed storage latency optimization
+  - [ ] Agent engine response streaming to channels
+- [ ] **Packaging**:
+  - [ ] A3S Box VM image (OCI) for standalone deployment
+  - [ ] Container image for A3S OS deployment
 - [ ] **Documentation**:
   - [ ] Security whitepaper
-  - [ ] Deployment guide
+  - [ ] Deployment guide (standalone + A3S OS)
   - [ ] API documentation
 
 ### Phase 9: Runtime Security Audit Pipeline 🚧
@@ -1631,10 +1494,9 @@ Continuous runtime verification and audit:
   - Retention policies (30d / 90d / 1y configurable)
   - Query API for security investigations
 - [ ] **Security Policy Drift Detection**: A3sfile vs runtime state
-  - Periodic reconciliation: declared SecurityContext vs K8s actual state
+  - Periodic reconciliation: declared security policy vs actual runtime config
   - Detect manual modifications to security policies
-  - Auto-remediation or alert on drift
-  - Drift report in OS Platform Security Dashboard
+  - Alert on drift via audit event bus
 - [x] **Panic Path Elimination**: Systematic audit of unsafe code paths
   - [x] Audit all `unwrap()`, `expect()`, `panic!()`, `todo!()`, `unimplemented!()` in production code
   - [x] Replace with proper `Result`/`Option` error handling
@@ -1643,6 +1505,71 @@ Continuous runtime verification and audit:
   - [x] Context-aware PII detection via `privacy/semantic.rs` (trigger-phrase based, 9 categories, Chinese support)
   - [x] Enterprise compliance rules via `privacy/compliance.rs` (HIPAA, PCI-DSS, GDPR pre-built rule sets)
   - [ ] Local ML model for further false-positive reduction (future)
+
+### Phase 10: Gateway → Agent Pipeline (in-process, transitional) ✅
+
+> **Transitional**: In-process `AgentEngine` will be replaced by gRPC/unix socket
+> client to the local A3S Code service in Phase 11.
+
+Wire Gateway's channel message flow through AgentEngine with full security pipeline.
+
+- [x] **`generate_response()` on AgentEngine**: Non-WebSocket entry point for channel messages
+- [x] **Wire Gateway → AgentEngine**: Replace echo placeholder with LLM-powered responses
+- [x] **Output sanitization**: `SessionManager::sanitize_output()` on all agent responses
+
+### Phase 11: Architecture Correction 📋
+
+Correct two architectural errors: (1) host/guest role inversion from Phase 4,
+(2) in-process a3s-code embedding from Phase 3.25. SafeClaw is a **security proxy**
+inside an A3S Box VM. A3S Code runs as a separate local service in the same VM.
+
+#### Phase 11.1: Replace in-process AgentEngine with local service client (P0)
+
+- [ ] **A3S Code local service client**: gRPC/unix socket client to a3s-code
+  - Replace `AgentEngine` (in-process) with service call to local a3s-code process
+  - a3s-code exposes `AgentService` on unix socket inside the VM
+  - SafeClaw sends prompt, receives streaming response
+- [ ] **Remove `a3s-code` Cargo dependency**: SafeClaw only needs proto stubs
+- [ ] **Remove `AgentEngine`**: No in-process agent runtime
+- [ ] **Keep `generate_response()` API**: Refactored to call local service instead of in-process
+- [ ] **Browser UI WebSocket proxy**: `/ws/agent/browser/:id` proxies to a3s-code service
+
+#### Phase 11.2: TEE self-detection (P0)
+
+- [ ] **`TeeRuntime`** (replaces `TeeOrchestrator`):
+  - Startup self-detection: check `/dev/sev-guest` or `a3s-box-core::TeeConfig`
+  - If SEV-SNP present → enable sealed storage, expose attestation endpoint
+  - If not present → disabled mode, all application security still active
+  - `is_tee() -> bool` / `seal(data)` / `unseal(blob)` API
+- [ ] **Remove `a3s-box-runtime` dependency**: SafeClaw is guest, not host
+- [ ] **Remove `TeeOrchestrator`**: No VM boot, no `VmController`, no `InstanceSpec`
+- [ ] **Keep `a3s-box-core`**: TEE self-detection, sealed storage, RA-TLS
+- [ ] **Refactor `SessionManager`**: Remove orchestrator wiring, use `TeeRuntime`
+- [ ] **Feature flag cleanup**: `real-tee` flag for `a3s-box-core` sealed storage; `mock-tee` for testing
+
+### Phase 12: HITL in Chat Channels 📋
+
+Forward Human-In-The-Loop confirmation requests to chat channel users.
+
+- [ ] **Confirmation forwarding**: `ConfirmationRequired` → channel message with approve/reject
+- [ ] **Response parsing**: `yes`/`no`/`approve`/`reject`/`/allow`/`/deny`
+- [ ] **Per-channel permission policy**: `trust`/`strict`/`default` per channel
+- [ ] **Timeout handling**: Configurable default action on HITL timeout
+
+### Phase 13: A3S Platform Integration (optional) 📋
+
+Connect to A3S OS platform services when available. All integrations are config-driven
+and fall back to in-process defaults when services are not present.
+
+- [ ] **a3s-event**: Audit events → NATS (replaces in-memory broadcast bus)
+- [ ] **a3s-cron**: Scheduled autonomous task execution
+- [ ] **Session persistence**: Survive restarts via external store (Redis/SQLite)
+
+### Phase 14: Proactive Task Scheduler 📋
+
+- [ ] **Task definitions**: Cron schedule + prompt + target channel
+- [ ] **Autonomous execution**: Agent runs without user prompt trigger
+- [ ] **Result delivery**: Push to configured channel (full/summary/diff)
 
 ## API Reference
 
@@ -1728,23 +1655,26 @@ SafeClaw exposes **33 REST endpoints + 1 WebSocket** organized into 8 modules. A
 
 ## A3S Ecosystem
 
-SafeClaw is the **main application** of the A3S Agent Operating System:
+SafeClaw runs inside A3S Box (VM runtime) alongside a local A3S Code service.
+A3S OS is **application-agnostic** — it only provides A3S Gateway (traffic routing)
+and A3S Box (VM runtime). It doesn't know or care what application runs inside.
 
 ```
-a3s-gateway (OS external gateway — all traffic enters here)
-    → SafeClaw (OS main application — runs inside a3s-box MicroVM)  ← You are here
-        → A3sfile (orchestrates multiple a3s-code agents + models + tools)
-            → a3s-code instances (each with a3s-lane priority queue)
+A3S Box VM
+├── SafeClaw         security proxy (channels, classify, sanitize, audit)
+└── A3S Code         agent service (runtime, tools, LLM calls, a3s-lane)
+    ↑ gRPC / unix socket (local, within same VM)
 ```
 
-| Project | Description | Relationship |
-|---------|-------------|--------------|
-| [A3S Gateway](https://github.com/A3S-Lab/Gateway) | OS external gateway | Sits in front of SafeClaw, normalizes 7-platform webhooks, routes traffic |
-| [A3S Box](https://github.com/A3S-Lab/Box) | MicroVM sandbox runtime | SafeClaw runs inside a3s-box for hardware isolation |
-| [A3S Code](https://github.com/A3S-Lab/Code) | AI coding agent | SafeClaw orchestrates multiple a3s-code instances in-process |
-| [A3S Lane](https://github.com/A3S-Lab/Lane) | Per-session priority queue | Each a3s-code session uses its own a3s-lane |
-| [A3S Power](https://github.com/A3S-Lab/Power) | Local LLM inference | Provides local model serving for TEE Coordinator/Validator |
-| [A3S Context](https://github.com/A3S-Lab/Context) | Hierarchical context management | Context and memory for agent sessions |
+| Project | Role | SafeClaw's relationship |
+|---------|------|------------------------|
+| [A3S Box](https://github.com/A3S-Lab/Box) | VM runtime (standalone + K8s) | SafeClaw runs inside it; uses `a3s-box-core` for TEE self-detection |
+| [A3S Code](https://github.com/A3S-Lab/Code) | AI agent service | Local service in same VM; SafeClaw calls via gRPC/unix socket |
+| [A3S Gateway](https://github.com/A3S-Lab/Gateway) | K8s Ingress Controller | Routes traffic to SafeClaw; app-agnostic |
+| [A3S Lane](https://github.com/A3S-Lab/Lane) | Per-session priority queue | Inside a3s-code, not SafeClaw's concern |
+| [A3S Event](https://github.com/A3S-Lab/Event) | Event bus (NATS/Redis) | Optional: audit event forwarding (Phase 13) |
+| [A3S Cron](https://github.com/A3S-Lab/Cron) | Job scheduler | Optional: scheduled tasks (Phase 14) |
+| [A3S Power](https://github.com/A3S-Lab/Power) | Local LLM inference | Optional: offline TEE inference (Phase 6) |
 
 ## Development
 

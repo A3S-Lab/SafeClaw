@@ -1,5 +1,6 @@
 //! Gateway server implementation
 
+use crate::agent::AgentEngine;
 use crate::channels::{
     ChannelAdapter, ChannelEvent, DingTalkAdapter, DiscordAdapter, FeishuAdapter, SlackAdapter,
     TelegramAdapter, WeComAdapter, WebChatAdapter,
@@ -42,6 +43,8 @@ pub struct Gateway {
     audit_bus: Arc<AuditEventBus>,
     /// Alert monitor for rate-based anomaly detection
     alert_monitor: Arc<AlertMonitor>,
+    /// Agent engine for LLM-powered message processing
+    agent_engine: Arc<RwLock<Option<Arc<AgentEngine>>>>,
 }
 
 impl Gateway {
@@ -83,6 +86,7 @@ impl Gateway {
             global_audit_log,
             audit_bus,
             alert_monitor,
+            agent_engine: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -231,11 +235,18 @@ impl Gateway {
             let session_router = self.session_router.clone();
             let session_manager = self.session_manager.clone();
             let channels = self.channels.clone();
+            let agent_engine = self.agent_engine.read().await.clone();
 
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    if let Err(e) =
-                        Self::handle_event(event, &session_router, &session_manager, &channels).await
+                    if let Err(e) = Self::handle_event(
+                        event,
+                        &session_router,
+                        &session_manager,
+                        &channels,
+                        &agent_engine,
+                    )
+                    .await
                     {
                         tracing::error!("Error handling event: {}", e);
                     }
@@ -250,6 +261,7 @@ impl Gateway {
         session_router: &Arc<SessionRouter>,
         session_manager: &Arc<SessionManager>,
         channels: &Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>>,
+        agent_engine: &Option<Arc<AgentEngine>>,
     ) -> Result<()> {
         match event {
             ChannelEvent::Message(message) => {
@@ -276,9 +288,44 @@ impl Gateway {
                     session_manager
                         .process_in_tee(&decision.session_id, &message.content)
                         .await?
+                } else if let Some(engine) = agent_engine {
+                    // Process via AgentEngine (LLM-powered response)
+                    match engine
+                        .generate_response(&decision.session_id, &message.content)
+                        .await
+                    {
+                        Ok(text) => text,
+                        Err(e) => {
+                            tracing::error!(
+                                session = %decision.session_id,
+                                "Agent generation failed: {}",
+                                e
+                            );
+                            format!(
+                                "Sorry, I encountered an error processing your message: {}",
+                                e
+                            )
+                        }
+                    }
                 } else {
-                    // Process locally (placeholder)
-                    format!("Received: {}", message.content)
+                    // No agent engine configured
+                    tracing::warn!("No agent engine configured, cannot process message");
+                    "Agent engine not configured. Please set up an LLM provider.".to_string()
+                };
+
+                // Sanitize output through leakage prevention
+                let sanitized = session_manager
+                    .sanitize_output(&decision.session_id, &response)
+                    .await;
+                let response = if sanitized.was_redacted {
+                    tracing::warn!(
+                        session = %decision.session_id,
+                        redactions = sanitized.redaction_count,
+                        "Redacted tainted data from agent output"
+                    );
+                    sanitized.sanitized_text
+                } else {
+                    response
                 };
 
                 // Send response
@@ -341,6 +388,15 @@ impl Gateway {
         &self.audit_bus
     }
 
+    /// Set the agent engine for LLM-powered message processing.
+    ///
+    /// Must be called before `start()` for channel messages to be processed
+    /// by the LLM agent. Without an agent engine, channel messages receive
+    /// a placeholder response.
+    pub async fn set_agent_engine(&self, engine: Arc<AgentEngine>) {
+        *self.agent_engine.write().await = Some(engine);
+    }
+
     /// Get active channel names
     pub async fn active_channel_names(&self) -> Vec<String> {
         self.channels.read().await.keys().cloned().collect()
@@ -383,7 +439,41 @@ impl Gateway {
                 .process_in_tee(&decision.session_id, &message.content)
                 .await?
         } else {
-            format!("Received: {}", message.content)
+            let engine = self.agent_engine.read().await;
+            if let Some(engine) = engine.as_ref() {
+                engine
+                    .generate_response(&decision.session_id, &message.content)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::error!(
+                            session = %decision.session_id,
+                            "Agent generation failed: {}",
+                            e
+                        );
+                        format!(
+                            "Sorry, I encountered an error processing your message: {}",
+                            e
+                        )
+                    })
+            } else {
+                "Agent engine not configured. Please set up an LLM provider.".to_string()
+            }
+        };
+
+        // Sanitize output through leakage prevention
+        let sanitized = self
+            .session_manager
+            .sanitize_output(&decision.session_id, &response_content)
+            .await;
+        let response_content = if sanitized.was_redacted {
+            tracing::warn!(
+                session = %decision.session_id,
+                redactions = sanitized.redaction_count,
+                "Redacted tainted data from agent output"
+            );
+            sanitized.sanitized_text
+        } else {
+            response_content
         };
 
         // Build outbound message
