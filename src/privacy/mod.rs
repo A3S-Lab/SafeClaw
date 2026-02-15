@@ -10,6 +10,7 @@
 pub mod backend;
 pub mod classifier;
 pub mod compliance;
+pub mod cumulative;
 pub mod handler;
 mod policy;
 pub mod semantic;
@@ -20,6 +21,7 @@ pub use backend::{
 };
 pub use classifier::{ClassificationResult, Classifier, Match};
 pub use compliance::{ComplianceEngine, ComplianceFramework, ComplianceRuleSet};
+pub use cumulative::{CumulativeRiskDecision, PiiType, SessionPrivacyContext};
 pub use handler::{privacy_router, PrivacyState};
 pub use policy::{DataPolicy, PolicyBuilder, PolicyDecision, PolicyEngine};
 pub use semantic::{SemanticAnalyzer, SemanticCategory, SemanticMatch};
