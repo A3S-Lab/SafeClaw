@@ -14,6 +14,7 @@ use safeclaw::{
     },
     events::{events_router, EventStore, EventsState},
     gateway::GatewayBuilder,
+    leakage::{audit_router, AuditState},
     personas::{personas_router, PersonaStore, PersonasState},
     settings::{settings_router, SettingsState},
 };
@@ -267,6 +268,12 @@ async fn run_gateway(
 
     gateway.start().await?;
 
+    // Build audit state from gateway's shared log and alert monitor
+    let audit_state = AuditState {
+        log: gateway.global_audit_log().clone(),
+        alert_monitor: Some(gateway.alert_monitor().clone()),
+    };
+
     // Build agent router with CORS for cross-origin UI access
     let agent_state = build_agent_state(models.clone()).await?;
     let events_state = build_events_state().await?;
@@ -280,6 +287,7 @@ async fn run_gateway(
         .merge(events_router(events_state))
         .merge(settings_router(settings_state))
         .merge(personas_router(personas_state))
+        .merge(audit_router(audit_state))
         .layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
@@ -328,6 +336,12 @@ async fn run_serve(
 
     gateway.start().await?;
 
+    // Build audit state from gateway's shared log and alert monitor
+    let audit_state = AuditState {
+        log: gateway.global_audit_log().clone(),
+        alert_monitor: Some(gateway.alert_monitor().clone()),
+    };
+
     // Build HTTP API router for a3s-gateway to proxy to, merged with agent router
     let agent_state = build_agent_state(config.models.clone()).await?;
     let events_state = build_events_state().await?;
@@ -342,6 +356,7 @@ async fn run_serve(
         .merge(events_router(events_state))
         .merge(settings_router(settings_state))
         .merge(personas_router(personas_state))
+        .merge(audit_router(audit_state))
         .layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)

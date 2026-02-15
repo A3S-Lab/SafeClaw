@@ -28,6 +28,10 @@ pub struct SafeClawConfig {
 
     /// Storage configuration
     pub storage: StorageConfig,
+
+    /// Audit event pipeline configuration
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 /// A3S Gateway integration configuration
@@ -667,6 +671,25 @@ impl Default for StorageConfig {
             secure_dir: base.join("secure"),
             base_dir: base,
             encrypt_at_rest: true,
+        }
+    }
+}
+
+/// Audit event pipeline configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Broadcast channel / audit log buffer capacity
+    pub bus_capacity: usize,
+
+    /// Alert monitor configuration
+    pub alert: crate::leakage::AlertConfig,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            bus_capacity: 10_000,
+            alert: crate::leakage::AlertConfig::default(),
         }
     }
 }

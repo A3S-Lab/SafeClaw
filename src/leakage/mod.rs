@@ -17,7 +17,9 @@
 //! AuditLog (record all blocked attempts)
 //! ```
 
+pub mod alerting;
 pub mod audit;
+pub mod bus;
 pub mod firewall;
 pub mod handler;
 pub mod injection;
@@ -26,7 +28,9 @@ pub mod isolation;
 pub mod sanitizer;
 pub mod taint;
 
+pub use alerting::{Alert, AlertConfig, AlertKind, AlertMonitor};
 pub use audit::{AuditEvent, AuditLog, AuditSeverity, LeakageVector};
+pub use bus::AuditEventBus;
 pub use firewall::{FirewallDecision, FirewallResult, NetworkFirewall, NetworkPolicy};
 pub use handler::{audit_router, AuditState};
 pub use injection::{InjectionCategory, InjectionDetector, InjectionResult, InjectionVerdict};

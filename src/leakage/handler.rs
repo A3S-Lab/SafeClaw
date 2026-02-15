@@ -6,6 +6,7 @@
 //! - GET /api/v1/audit/stats        — summary statistics
 
 use crate::error::to_json;
+use crate::leakage::alerting::AlertMonitor;
 use crate::leakage::audit::{AuditEvent, AuditLog, AuditSeverity};
 use axum::{
     extract::{Path, Query, State},
@@ -22,6 +23,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct AuditState {
     pub log: Arc<RwLock<AuditLog>>,
+    pub alert_monitor: Option<Arc<AlertMonitor>>,
 }
 
 /// Create the audit router
@@ -30,6 +32,7 @@ pub fn audit_router(state: AuditState) -> Router {
         .route("/api/v1/audit/events", get(list_events))
         .route("/api/v1/audit/events/:id", get(get_event))
         .route("/api/v1/audit/stats", get(get_stats))
+        .route("/api/v1/audit/alerts", get(get_alerts))
         .with_state(state)
 }
 
@@ -135,6 +138,38 @@ async fn get_stats(State(state): State<AuditState>) -> impl IntoResponse {
     })
 }
 
+// =============================================================================
+// Alerts query / handler
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+struct AlertsQuery {
+    limit: Option<usize>,
+}
+
+/// GET /api/v1/audit/alerts
+async fn get_alerts(
+    State(state): State<AuditState>,
+    Query(params): Query<AlertsQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(50).min(500);
+
+    match &state.alert_monitor {
+        Some(monitor) => {
+            let alerts = monitor.recent_alerts(limit).await;
+            Json(serde_json::json!({
+                "alerts": alerts,
+                "total": monitor.alert_count().await,
+            }))
+        }
+        None => Json(serde_json::json!({
+            "alerts": [],
+            "total": 0,
+            "message": "Alert monitor not enabled",
+        })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,7 +180,10 @@ mod tests {
 
     async fn make_app() -> (Router, Arc<RwLock<AuditLog>>) {
         let log = Arc::new(RwLock::new(AuditLog::new(1000)));
-        let state = AuditState { log: log.clone() };
+        let state = AuditState {
+            log: log.clone(),
+            alert_monitor: None,
+        };
         (audit_router(state), log)
     }
 
@@ -337,5 +375,63 @@ mod tests {
         assert_eq!(json["bySeverity"]["high"], 1);
         assert_eq!(json["bySeverity"]["critical"], 1);
         assert_eq!(json["bySeverity"]["warning"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_alerts_endpoint_no_monitor() {
+        let (app, _log) = make_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/alerts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 0);
+        assert!(json["alerts"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_alerts_endpoint_with_monitor() {
+        use crate::leakage::alerting::{AlertConfig, AlertMonitor};
+
+        let log = Arc::new(RwLock::new(AuditLog::new(1000)));
+        let monitor = Arc::new(AlertMonitor::new(AlertConfig::default()));
+
+        // Feed a critical event to generate an alert
+        let event = AuditEvent::new(
+            "sess-1".to_string(),
+            AuditSeverity::Critical,
+            LeakageVector::ToolCall,
+            "critical tool call".to_string(),
+        );
+        monitor.process_event(&event).await;
+
+        let state = AuditState {
+            log,
+            alert_monitor: Some(monitor),
+        };
+        let app = audit_router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/audit/alerts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["alerts"].as_array().unwrap().len(), 1);
+        assert_eq!(json["alerts"][0]["sessionId"], "sess-1");
     }
 }

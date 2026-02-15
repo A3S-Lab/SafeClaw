@@ -121,7 +121,9 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let session_manager = Arc::new(SessionManager::new(tee_config));
+        let global_log = Arc::new(tokio::sync::RwLock::new(crate::leakage::AuditLog::default()));
+        let audit_bus = Arc::new(crate::leakage::AuditEventBus::new(256, global_log));
+        let session_manager = Arc::new(SessionManager::new(tee_config, audit_bus));
         let privacy_config = PrivacyConfig::default();
         let classifier =
             Arc::new(Classifier::new(privacy_config.rules, privacy_config.default_level).unwrap());

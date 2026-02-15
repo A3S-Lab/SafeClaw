@@ -6,6 +6,7 @@ use crate::channels::{
 };
 use crate::config::SafeClawConfig;
 use crate::error::{Error, Result};
+use crate::leakage::{AlertMonitor, AuditEventBus, AuditLog};
 use crate::privacy::{Classifier, PolicyEngine};
 use crate::session::{SessionManager, SessionRouter};
 use serde::Serialize;
@@ -35,6 +36,12 @@ pub struct Gateway {
     channels: Arc<RwLock<HashMap<String, Arc<dyn ChannelAdapter>>>>,
     event_tx: mpsc::Sender<ChannelEvent>,
     event_rx: Arc<RwLock<Option<mpsc::Receiver<ChannelEvent>>>>,
+    /// Global audit log shared with the REST API
+    global_audit_log: Arc<RwLock<AuditLog>>,
+    /// Centralized audit event bus
+    audit_bus: Arc<AuditEventBus>,
+    /// Alert monitor for rate-based anomaly detection
+    alert_monitor: Arc<AlertMonitor>,
 }
 
 impl Gateway {
@@ -42,7 +49,16 @@ impl Gateway {
     pub fn new(config: SafeClawConfig) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(1000);
 
-        let session_manager = Arc::new(SessionManager::new(config.tee.clone()));
+        // Create shared global audit log and event bus
+        let audit_capacity = config.audit.bus_capacity;
+        let global_audit_log = Arc::new(RwLock::new(AuditLog::new(audit_capacity)));
+        let audit_bus = Arc::new(AuditEventBus::new(audit_capacity, global_audit_log.clone()));
+        let alert_monitor = Arc::new(AlertMonitor::new(config.audit.alert.clone()));
+
+        let session_manager = Arc::new(SessionManager::new(
+            config.tee.clone(),
+            audit_bus.clone(),
+        ));
 
         let classifier = Arc::new(
             Classifier::new(config.privacy.rules.clone(), config.privacy.default_level)
@@ -64,6 +80,9 @@ impl Gateway {
             channels: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             event_rx: Arc::new(RwLock::new(Some(event_rx))),
+            global_audit_log,
+            audit_bus,
+            alert_monitor,
         })
     }
 
@@ -86,6 +105,13 @@ impl Gateway {
         // Initialize TEE subsystem
         if self.config.tee.enabled {
             self.session_manager.init_tee().await?;
+        }
+
+        // Start audit event pipeline: session forwarder + alert monitor
+        self.audit_bus
+            .spawn_session_forwarder(self.session_manager.isolation().clone());
+        if self.config.audit.alert.enabled {
+            self.alert_monitor.spawn(self.audit_bus.subscribe());
         }
 
         // Initialize channels
@@ -298,6 +324,21 @@ impl Gateway {
     /// Get configuration
     pub fn config(&self) -> &SafeClawConfig {
         &self.config
+    }
+
+    /// Get the global audit log (for constructing AuditState)
+    pub fn global_audit_log(&self) -> &Arc<RwLock<AuditLog>> {
+        &self.global_audit_log
+    }
+
+    /// Get the alert monitor (for constructing AuditState)
+    pub fn alert_monitor(&self) -> &Arc<AlertMonitor> {
+        &self.alert_monitor
+    }
+
+    /// Get the audit event bus
+    pub fn audit_bus(&self) -> &Arc<AuditEventBus> {
+        &self.audit_bus
     }
 
     /// Get active channel names

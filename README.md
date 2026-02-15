@@ -1616,15 +1616,16 @@ Production readiness and deployment:
 
 Continuous runtime verification and audit:
 
-- [ ] **Audit Event Pipeline**: SafeClaw → structured audit events → NATS Stream
-  - Event types: tool_blocked, pii_detected, taint_triggered, injection_attempt
-  - Event schema: timestamp, session_id, severity, event_type, details
-  - NATS JetStream for durable delivery
-- [ ] **Real-time Alerting**: Anomaly detection on audit event stream
-  - Abnormal tool call frequency (> N calls/min per session)
-  - Sensitive data access spikes
-  - Repeated injection attempts from same session
-  - Configurable alert rules (webhook, Slack, PagerDuty)
+- [x] **Audit Event Pipeline**: Centralized `AuditEventBus` via `tokio::broadcast`
+  - All 4 leakage producers (InjectionDetector, OutputSanitizer, ToolInterceptor, NetworkFirewall) wired to bus
+  - Global `AuditLog` populated in real-time (REST API `/api/v1/audit/*` returns actual events)
+  - Per-session logs updated automatically via bus subscriber
+  - Ready for NATS forwarding (`spawn_session_forwarder` pattern)
+- [x] **Real-time Alerting**: `AlertMonitor` with sliding-window rate detection
+  - Critical events → immediate alert
+  - Session rate exceeded → alert (configurable: N events in M-second window)
+  - `GET /api/v1/audit/alerts` REST endpoint
+  - Configurable thresholds via `AuditConfig` (`audit.alert.*` in config)
 - [ ] **Audit Persistence**: Long-term storage for compliance
   - PostgreSQL / ClickHouse backend for audit events
   - Retention policies (30d / 90d / 1y configurable)
@@ -1694,6 +1695,7 @@ SafeClaw exposes **33 REST endpoints + 1 WebSocket** organized into 8 modules. A
 | GET | `/api/v1/audit/events?session=&severity=&limit=` | List audit events with optional session/severity filter and pagination |
 | GET | `/api/v1/audit/events/:id` | Get single audit event by ID |
 | GET | `/api/v1/audit/stats` | Summary statistics: total events, breakdown by severity and leakage vector |
+| GET | `/api/v1/audit/alerts?limit=` | Recent anomaly alerts (critical events, rate-limit exceeded) |
 
 ### Settings (`/api/v1/settings`)
 
@@ -1754,7 +1756,7 @@ cargo build
 
 ### Test
 
-**510 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, and leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense).
+**527 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels, crypto, memory (3-layer hierarchy), gateway, sessions, TEE integration, agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense), audit event bus, and real-time alerting.
 
 ```bash
 cargo test

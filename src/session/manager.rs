@@ -9,7 +9,10 @@
 
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
-use crate::leakage::{InjectionDetector, InjectionVerdict, NetworkFirewall, SessionIsolation};
+use crate::leakage::{
+    AuditEventBus, FirewallResult, InjectionDetector, InjectionVerdict, InterceptResult,
+    NetworkFirewall, OutputSanitizer, SanitizeResult, SessionIsolation, ToolInterceptor,
+};
 use crate::tee::TeeOrchestrator;
 #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
 use crate::tee::{TeeClient, TeeMessage, TeeResponse};
@@ -273,14 +276,16 @@ pub struct SessionManager {
     injection_detector: Arc<InjectionDetector>,
     /// Network firewall for outbound connection control
     network_firewall: Arc<NetworkFirewall>,
+    /// Centralized audit event bus
+    audit_bus: Arc<AuditEventBus>,
 }
 
 impl SessionManager {
-    /// Create a new session manager with TEE configuration.
+    /// Create a new session manager with TEE configuration and audit bus.
     ///
     /// Uses `TeeOrchestrator` for real TEE communication. With the `mock-tee`
     /// feature, also creates a `MockTransport`-backed `TeeClient` as fallback.
-    pub fn new(tee_config: TeeConfig) -> Self {
+    pub fn new(tee_config: TeeConfig, audit_bus: Arc<AuditEventBus>) -> Self {
         let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
@@ -296,6 +301,7 @@ impl SessionManager {
             isolation: Arc::new(SessionIsolation::default()),
             injection_detector: Arc::new(InjectionDetector::new()),
             network_firewall,
+            audit_bus,
         }
     }
 
@@ -304,6 +310,7 @@ impl SessionManager {
     pub fn new_with_transport(
         tee_config: TeeConfig,
         transport: Box<dyn a3s_transport::Transport>,
+        audit_bus: Arc<AuditEventBus>,
     ) -> Self {
         let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
         let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
@@ -317,6 +324,7 @@ impl SessionManager {
             isolation: Arc::new(SessionIsolation::default()),
             injection_detector: Arc::new(InjectionDetector::new()),
             network_firewall,
+            audit_bus,
         }
     }
 
@@ -403,6 +411,86 @@ impl SessionManager {
     /// Get a reference to the network firewall
     pub fn network_firewall(&self) -> &Arc<NetworkFirewall> {
         &self.network_firewall
+    }
+
+    /// Get a reference to the audit event bus
+    pub fn audit_bus(&self) -> &Arc<AuditEventBus> {
+        &self.audit_bus
+    }
+
+    /// Sanitize AI output for a session, publishing any audit events.
+    ///
+    /// Uses the session's taint registry to scan the output for leaked
+    /// sensitive data and auto-redacts matches.
+    pub async fn sanitize_output(
+        &self,
+        session_id: &str,
+        output: &str,
+    ) -> SanitizeResult {
+        let result = if let Some(guard) = self.isolation.registry(session_id).await {
+            guard.read(|registry| {
+                OutputSanitizer::sanitize(registry, output, session_id)
+            }).await.unwrap_or_else(|| OutputSanitizer::sanitize(
+                &crate::leakage::TaintRegistry::default(),
+                output,
+                session_id,
+            ))
+        } else {
+            OutputSanitizer::sanitize(
+                &crate::leakage::TaintRegistry::default(),
+                output,
+                session_id,
+            )
+        };
+        if !result.audit_events.is_empty() {
+            self.audit_bus.publish_all(result.audit_events.clone()).await;
+        }
+        result
+    }
+
+    /// Intercept a tool call for a session, publishing any audit events.
+    ///
+    /// Checks tool arguments for tainted data and dangerous command patterns.
+    pub async fn intercept_tool_call(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        arguments: &str,
+    ) -> InterceptResult {
+        let result = if let Some(guard) = self.isolation.registry(session_id).await {
+            guard.read(|registry| {
+                ToolInterceptor::intercept(registry, tool_name, arguments, session_id)
+            }).await.unwrap_or_else(|| ToolInterceptor::intercept(
+                &crate::leakage::TaintRegistry::default(),
+                tool_name,
+                arguments,
+                session_id,
+            ))
+        } else {
+            ToolInterceptor::intercept(
+                &crate::leakage::TaintRegistry::default(),
+                tool_name,
+                arguments,
+                session_id,
+            )
+        };
+        if !result.audit_events.is_empty() {
+            self.audit_bus.publish_all(result.audit_events.clone()).await;
+        }
+        result
+    }
+
+    /// Check a URL against the network firewall, publishing any audit event.
+    pub async fn check_firewall(
+        &self,
+        url: &str,
+        session_id: &str,
+    ) -> FirewallResult {
+        let result = self.network_firewall.check_url(url, session_id);
+        if let Some(ref event) = result.audit_event {
+            self.audit_bus.publish(event.clone()).await;
+        }
+        result
     }
 
     /// Create a new session
@@ -554,12 +642,10 @@ impl SessionManager {
         // Prompt injection defense: scan input before forwarding
         let injection_result = self.injection_detector.scan(content, session_id);
         if injection_result.verdict == InjectionVerdict::Blocked {
-            // Record audit events in session-scoped log
-            if let Some(guard) = self.isolation.audit_log(session_id).await {
-                guard
-                    .write(|log| log.record_all(injection_result.audit_events))
-                    .await;
-            }
+            // Publish audit events to centralized bus (writes to global log + broadcasts)
+            self.audit_bus
+                .publish_all(injection_result.audit_events)
+                .await;
             return Err(Error::Tee(format!(
                 "Prompt injection blocked: {} pattern(s) detected",
                 injection_result.matches.len()
@@ -568,11 +654,9 @@ impl SessionManager {
 
         // Record suspicious patterns (warn but allow)
         if injection_result.verdict == InjectionVerdict::Suspicious {
-            if let Some(guard) = self.isolation.audit_log(session_id).await {
-                guard
-                    .write(|log| log.record_all(injection_result.audit_events))
-                    .await;
-            }
+            self.audit_bus
+                .publish_all(injection_result.audit_events)
+                .await;
         }
 
         // Route through orchestrator's RA-TLS channel
@@ -693,13 +777,27 @@ impl SessionManager {
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self::new(TeeConfig::default())
+        let global_log = Arc::new(RwLock::new(crate::leakage::AuditLog::default()));
+        let bus = Arc::new(AuditEventBus::new(256, global_log));
+        Self::new(TeeConfig::default(), bus)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::leakage::AuditLog;
+
+    /// Create a default bus for tests.
+    fn test_bus() -> Arc<AuditEventBus> {
+        let log = Arc::new(RwLock::new(AuditLog::default()));
+        Arc::new(AuditEventBus::new(256, log))
+    }
+
+    /// Create a SessionManager from a TeeConfig with a default test bus.
+    fn make_manager(config: TeeConfig) -> SessionManager {
+        SessionManager::new(config, test_bus())
+    }
 
     // ---- Session tests ----
 
@@ -833,7 +931,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let manager = SessionManager::new(config);
+        let manager = make_manager(config);
 
         let session = manager
             .create_session("user-123", "telegram", "chat-456")
@@ -846,13 +944,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_is_tee_enabled() {
-        let disabled = SessionManager::new(TeeConfig {
+        let disabled = make_manager(TeeConfig {
             enabled: false,
             ..Default::default()
         });
         assert!(!disabled.is_tee_enabled());
 
-        let enabled = SessionManager::new(TeeConfig {
+        let enabled = make_manager(TeeConfig {
             enabled: true,
             ..Default::default()
         });
@@ -865,10 +963,106 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let manager = SessionManager::new(config);
+        let manager = make_manager(config);
 
         let result = manager.upgrade_to_tee("nonexistent").await;
         assert!(result.is_err());
+    }
+
+    // ---- Audit bus wiring tests ----
+
+    #[tokio::test]
+    async fn test_sanitize_output_publishes_events() {
+        let global_log = Arc::new(RwLock::new(AuditLog::new(100)));
+        let bus = Arc::new(AuditEventBus::new(256, global_log.clone()));
+        let manager = SessionManager::new(TeeConfig::default(), bus);
+
+        let session = manager
+            .create_session("user-1", "test", "chat-1")
+            .await
+            .unwrap();
+
+        // Register tainted data in the session's registry
+        if let Some(guard) = manager.isolation().registry(&session.id).await {
+            guard
+                .write(|registry| {
+                    registry.register("sk-secret-key-123", crate::leakage::TaintType::ApiKey);
+                })
+                .await;
+        }
+
+        // Sanitize output containing the tainted data
+        let result = manager
+            .sanitize_output(&session.id, "The key is sk-secret-key-123")
+            .await;
+        assert!(result.was_redacted);
+
+        // Events should be in the global log
+        let log = global_log.read().await;
+        assert!(log.len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_intercept_tool_call_publishes_events() {
+        let global_log = Arc::new(RwLock::new(AuditLog::new(100)));
+        let bus = Arc::new(AuditEventBus::new(256, global_log.clone()));
+        let manager = SessionManager::new(TeeConfig::default(), bus);
+
+        let session = manager
+            .create_session("user-1", "test", "chat-1")
+            .await
+            .unwrap();
+
+        // Register tainted data
+        if let Some(guard) = manager.isolation().registry(&session.id).await {
+            guard
+                .write(|registry| {
+                    registry.register("my-secret-password", crate::leakage::TaintType::Password);
+                })
+                .await;
+        }
+
+        let result = manager
+            .intercept_tool_call(&session.id, "bash", "echo my-secret-password")
+            .await;
+        // Should detect both tainted data and dangerous command
+        assert!(!result.audit_events.is_empty());
+
+        let log = global_log.read().await;
+        assert!(log.len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_firewall_publishes_blocked_event() {
+        let global_log = Arc::new(RwLock::new(AuditLog::new(100)));
+        let bus = Arc::new(AuditEventBus::new(256, global_log.clone()));
+        let mut tee_config = TeeConfig::default();
+        // Ensure default-deny firewall is active
+        tee_config.network_policy.enabled = true;
+        tee_config.network_policy.default_deny = true;
+        let manager = SessionManager::new(tee_config, bus);
+
+        let session = manager
+            .create_session("user-1", "test", "chat-1")
+            .await
+            .unwrap();
+
+        // Check a URL that's not in the whitelist
+        let result = manager
+            .check_firewall("https://evil-exfil.example.com/steal", &session.id)
+            .await;
+
+        // Should be blocked
+        assert_ne!(
+            result.decision,
+            crate::leakage::FirewallDecision::Allow
+        );
+
+        // If blocked, an audit event should have been published
+        if result.audit_event.is_some() {
+            let log = global_log.read().await;
+            assert!(log.len() > 0);
+        }
     }
 
     // ---- Mock-TEE tests (require mock-tee feature) ----
@@ -942,7 +1136,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             };
-            let manager = SessionManager::new(config);
+            let manager = make_manager(config);
             manager.tee_client.connect().await.unwrap();
 
             let session = manager
@@ -964,7 +1158,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             };
-            let manager = SessionManager::new(config);
+            let manager = make_manager(config);
             manager.tee_client.connect().await.unwrap();
 
             let session = manager
@@ -988,7 +1182,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             };
-            let manager = SessionManager::new(config);
+            let manager = make_manager(config);
             manager.tee_client.connect().await.unwrap();
 
             let session = manager
@@ -1010,7 +1204,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             };
-            let manager = SessionManager::new(config);
+            let manager = make_manager(config);
             manager.tee_client.connect().await.unwrap();
 
             let session = manager

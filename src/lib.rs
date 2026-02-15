@@ -108,13 +108,14 @@ pub mod tee;
 
 pub use agent::{agent_router, AgentEngine, AgentSessionStore, AgentState};
 pub use api::build_app;
-pub use config::{A3sGatewayConfig, SafeClawConfig};
+pub use config::{A3sGatewayConfig, AuditConfig, SafeClawConfig};
 pub use error::{Error, Result};
 pub use events::{events_router, EventStore, EventsState};
 pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};
 pub use leakage::{
-    AuditLog, AuditState, InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer,
-    SessionIsolation, TaintRegistry, ToolInterceptor,
+    Alert, AlertConfig, AlertKind, AlertMonitor, AuditEventBus, AuditLog, AuditState,
+    InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer, SessionIsolation,
+    TaintRegistry, ToolInterceptor,
 };
 pub use personas::{personas_router, PersonaStore, PersonasState};
 pub use privacy::{privacy_router, PrivacyState};
