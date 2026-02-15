@@ -6,7 +6,7 @@
 mod keys;
 mod secure_channel;
 
-pub use keys::{KeyPair, PublicKey, SecretKey};
+pub use keys::{EphemeralKeyPair, KeyPair, PublicKey, SharedSecret};
 pub use secure_channel::{SecureChannel, SecureChannelBuilder};
 
 use crate::error::{Error, Result};

@@ -84,6 +84,8 @@ ring = "0.17"
 aes-gcm = "0.10"
 x25519-dalek = { version = "2.0", features = ["reusable_secrets"] }
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+hkdf = "0.12"
+zeroize = { version = "1.7", features = ["derive"] }
 
 # TLS for RA-TLS channel
 rustls = { version = "0.23", features = ["ring"] }

@@ -5,7 +5,8 @@
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, ReusableSecret};
+use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// X25519 public key for key exchange
 #[derive(Clone)]
@@ -23,27 +24,60 @@ impl PublicKey {
     }
 }
 
-/// X25519 secret key for key exchange
-pub struct SecretKey(pub(crate) ReusableSecret);
+/// Ephemeral X25519 key pair for one-time key exchange (forward secrecy).
+///
+/// Each session generates a fresh ephemeral key pair. The secret is consumed
+/// during Diffie-Hellman and cannot be reused, ensuring forward secrecy:
+/// compromising a long-term key does not reveal past session keys.
+pub struct EphemeralKeyPair {
+    secret: Option<EphemeralSecret>,
+    public: PublicKey,
+}
 
-impl SecretKey {
-    /// Generate a new random secret key
+impl EphemeralKeyPair {
+    /// Generate a new ephemeral key pair
     pub fn generate() -> Self {
-        Self(ReusableSecret::random_from_rng(OsRng))
+        let secret = EphemeralSecret::random_from_rng(OsRng);
+        let public = PublicKey(X25519PublicKey::from(&secret));
+        Self {
+            secret: Some(secret),
+            public,
+        }
     }
 
-    /// Perform Diffie-Hellman key exchange
-    pub fn diffie_hellman(&self, their_public: &PublicKey) -> [u8; 32] {
-        self.0.diffie_hellman(&their_public.0).to_bytes()
-    }
-
-    /// Get the corresponding public key
+    /// Get the public key (safe to share)
     pub fn public_key(&self) -> PublicKey {
-        PublicKey(X25519PublicKey::from(&self.0))
+        self.public.clone()
+    }
+
+    /// Perform Diffie-Hellman and consume the ephemeral secret.
+    ///
+    /// Returns the shared secret. The ephemeral private key is destroyed
+    /// after this call (forward secrecy).
+    pub fn diffie_hellman(mut self, their_public: &PublicKey) -> Result<SharedSecret, &'static str> {
+        let secret = self.secret.take().ok_or("Ephemeral secret already consumed")?;
+        let shared = secret.diffie_hellman(&their_public.0);
+        Ok(SharedSecret(shared.to_bytes()))
     }
 }
 
-/// Ed25519 key pair for signing
+/// Shared secret from Diffie-Hellman key exchange.
+///
+/// Zeroized on drop to prevent secret material from lingering in memory.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SharedSecret(pub(crate) [u8; 32]);
+
+impl SharedSecret {
+    /// Access the raw bytes (for key derivation only)
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Ed25519 key pair for signing (long-term identity key).
+///
+/// Used only for identity verification and message signing,
+/// NOT for key exchange. Key exchange uses ephemeral X25519 keys.
 pub struct KeyPair {
     signing_key: SigningKey,
 }
@@ -72,63 +106,34 @@ impl KeyPair {
     }
 }
 
-/// Ephemeral key pair for one-time key exchange
-#[allow(dead_code)]
-pub struct EphemeralKeyPair {
-    secret: EphemeralSecret,
-    public: X25519PublicKey,
-}
-
-#[allow(dead_code)]
-impl EphemeralKeyPair {
-    /// Generate a new ephemeral key pair
-    pub fn generate() -> Self {
-        let secret = EphemeralSecret::random_from_rng(OsRng);
-        let public = X25519PublicKey::from(&secret);
-        Self { secret, public }
-    }
-
-    /// Get the public key
-    pub fn public_key(&self) -> PublicKey {
-        PublicKey(self.public)
-    }
-
-    /// Perform Diffie-Hellman and consume the ephemeral secret
-    pub fn diffie_hellman(self, their_public: &PublicKey) -> [u8; 32] {
-        self.secret.diffie_hellman(&their_public.0).to_bytes()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_key_exchange() {
-        let alice_secret = SecretKey::generate();
-        let alice_public = alice_secret.public_key();
+    fn test_ephemeral_key_exchange() {
+        let alice = EphemeralKeyPair::generate();
+        let bob = EphemeralKeyPair::generate();
 
-        let bob_secret = SecretKey::generate();
-        let bob_public = bob_secret.public_key();
+        let alice_pub = alice.public_key();
+        let bob_pub = bob.public_key();
 
-        let alice_shared = alice_secret.diffie_hellman(&bob_public);
-        let bob_shared = bob_secret.diffie_hellman(&alice_public);
+        let alice_shared = alice.diffie_hellman(&bob_pub).unwrap();
+        let bob_shared = bob.diffie_hellman(&alice_pub).unwrap();
 
-        assert_eq!(alice_shared, bob_shared);
+        assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
     }
 
     #[test]
-    fn test_ephemeral_key_exchange() {
+    fn test_ephemeral_secret_consumed() {
         let alice = EphemeralKeyPair::generate();
-        let alice_public = alice.public_key();
+        let bob = EphemeralKeyPair::generate();
+        let bob_pub = bob.public_key();
 
-        let bob_secret = SecretKey::generate();
-        let bob_public = bob_secret.public_key();
+        // First DH succeeds
+        let _shared = alice.diffie_hellman(&bob_pub).unwrap();
 
-        let alice_shared = alice.diffie_hellman(&bob_public);
-        let bob_shared = bob_secret.diffie_hellman(&alice_public);
-
-        assert_eq!(alice_shared, bob_shared);
+        // alice is moved — cannot be used again (compile-time guarantee)
     }
 
     #[test]
@@ -138,5 +143,26 @@ mod tests {
 
         let signature = keypair.sign(message);
         assert_eq!(signature.len(), 64);
+    }
+
+    #[test]
+    fn test_public_key_roundtrip() {
+        let kp = EphemeralKeyPair::generate();
+        let pk = kp.public_key();
+        let bytes = *pk.as_bytes();
+        let pk2 = PublicKey::from_bytes(&bytes);
+        assert_eq!(pk.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn test_shared_secret_zeroize() {
+        let alice = EphemeralKeyPair::generate();
+        let bob = EphemeralKeyPair::generate();
+        let bob_pub = bob.public_key();
+
+        let shared = alice.diffie_hellman(&bob_pub).unwrap();
+        // Verify it has content
+        assert_ne!(shared.as_bytes(), &[0u8; 32]);
+        // Drop will zeroize — can't test post-drop, but Zeroize derive ensures it
     }
 }
