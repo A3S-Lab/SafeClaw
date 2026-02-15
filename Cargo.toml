@@ -37,7 +37,7 @@ regex = "1.10"
 base64 = "0.21"
 
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "net", "signal", "io-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 
@@ -50,6 +50,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 toml = "0.8"
+hcl-rs = "0.18"
 
 # Error handling
 anyhow = "1.0"
@@ -122,6 +123,16 @@ hardening = ["dep:libc"]
 [build-dependencies]
 tonic-build = "0.11"
 prost-build = "0.12"
+
+[profile.release]
+opt-level = 3          # Max runtime performance (SafeClaw is a long-running server)
+lto = "thin"           # 10-20% size reduction, moderate build time
+codegen-units = 1      # Better optimization across crate boundaries
+strip = true           # Remove debug symbols from production binary
+panic = "abort"        # Smaller binary, no catch_unwind usage in codebase
+
+[profile.release.build-override]
+opt-level = 0          # Don't waste time optimizing build scripts
 
 [dev-dependencies]
 tempfile = "3.10"

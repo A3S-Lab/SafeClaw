@@ -30,7 +30,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(version)]
 #[command(about = "Secure Personal AI Assistant with TEE Support")]
 struct Cli {
-    /// Configuration file path
+    /// Configuration file path (supports .toml and .hcl)
     #[arg(short, long, env = "SAFECLAW_CONFIG")]
     config: Option<PathBuf>,
 
@@ -143,7 +143,10 @@ async fn main() -> Result<()> {
     // Load configuration
     let config = if let Some(config_path) = cli.config {
         let content = std::fs::read_to_string(&config_path)?;
-        toml::from_str(&content)?
+        match config_path.extension().and_then(|ext| ext.to_str()) {
+            Some("hcl") => hcl::from_str(&content)?,
+            _ => toml::from_str(&content)?,
+        }
     } else {
         SafeClawConfig::default()
     };
@@ -1122,5 +1125,39 @@ mod tests {
         assert!(unit.contains("/home/test/.config/safeclaw/config.toml"));
         assert!(unit.contains("gateway"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn test_config_parse_hcl() {
+        let hcl_str = r#"
+            gateway {
+                host = "0.0.0.0"
+                port = 9090
+            }
+
+            tee {
+                enabled = false
+            }
+
+            channels {}
+
+            privacy {}
+
+            models {
+                default_provider = "anthropic"
+            }
+
+            storage {}
+        "#;
+        let config: SafeClawConfig = hcl::from_str(hcl_str).unwrap();
+        assert_eq!(config.gateway.host, "0.0.0.0");
+        assert_eq!(config.gateway.port, 9090);
+        assert_eq!(config.models.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn test_config_parse_hcl_invalid() {
+        let result: std::result::Result<SafeClawConfig, _> = hcl::from_str("{{{{ invalid");
+        assert!(result.is_err());
     }
 }
