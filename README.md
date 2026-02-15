@@ -243,14 +243,18 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Multi-Channel Routing**: 7 platform adapters (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) with session routing via `user_id:channel_id:chat_id` composite keys
 - **Privacy Classification**: Regex + semantic + compliance (HIPAA, PCI-DSS, GDPR) PII detection via shared `a3s-privacy` library
 - **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
-- **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs
+- **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs. Full propagation through 3-layer memory hierarchy with taint audit trail
 - **Output Sanitization**: Scan agent responses for tainted data, auto-redact before delivery to user
 - **Injection Detection**: Block prompt injection attacks (role override, delimiter injection, encoded payloads)
 - **Tool Call Interception**: Block tool calls containing tainted data or dangerous exfiltration commands (curl, wget, nc, ssh, etc.)
 - **Network Firewall**: Whitelist-only outbound connections (LLM APIs only by default)
-- **Audit Pipeline**: Centralized event bus with real-time alerting (rate-based anomaly detection)
+- **Channel Auth**: Unified `ChannelAuth` trait with per-platform signature verification (HMAC-SHA256, Ed25519, SHA256), `AuthLayer` middleware with rate limiting on auth failures
+- **Audit Pipeline**: Centralized event bus with real-time alerting (rate-based anomaly detection), taint labels in audit events
 - **TEE Graceful Degradation**: If AMD SEV-SNP → sealed storage + attestation; if not → VM isolation + application security
 - **Session Isolation**: Per-session taint registry, audit log, secure memory wipe on termination
+- **Bounded State**: LRU-evicting stores with secure erasure (`zeroize`) on evict/remove/clear
+- **Process Hardening**: Core dump protection (`prctl` on Linux), HKDF key derivation, ephemeral key exchange, zeroize on all secret types
+- **Cumulative Privacy Gate**: Per-session PII accumulation tracking with configurable risk thresholds
 - **Unified REST API**: 34 endpoints (33 REST + 1 WebSocket) with CORS, privacy/audit/compliance APIs, webhook ingestion. See [API Reference](#api-reference)
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
@@ -1251,7 +1255,7 @@ Real channel adapters implemented locally with HTTP API calls, signature verific
 
 ### Phase 3: Architecture Redesign ✅
 
-Address structural issues identified in design review. All SafeClaw-side items complete; only cross-repo a3s-box framing migration remains (tracked below).
+All SafeClaw-side items complete. One cross-repo item remains (a3s-box framing migration) tracked in Phase 3.2 — does not block SafeClaw development.
 
 #### Phase 3.1: Extract Shared Privacy Types (P0 — Security Fix) ✅
 
@@ -1409,11 +1413,11 @@ Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privac
   - [x] Wired into `SessionManager::process_in_tee()` — blocks before forwarding to TEE
   - [x] Audit events: Critical for blocked, Warning for suspicious
 - [x] **Leakage Audit Log** (`leakage/audit.rs`):
-  - [x] Structured `AuditEvent` with id, session, severity, vector, description, timestamp
+  - [x] Structured `AuditEvent` with id, session, severity, vector, description, taint_labels, timestamp
   - [x] Bounded in-memory `AuditLog` with capacity eviction
   - [x] Query by session ID and severity level
   - [x] Severity levels: Info, Warning, High, Critical
-  - [x] Leakage vectors: OutputChannel, ToolCall, DangerousCommand, NetworkExfil, FileExfil
+  - [x] Leakage vectors: OutputChannel, ToolCall, DangerousCommand, NetworkExfil, FileExfil, AuthFailure
 
 ### Phase 6: Local LLM in TEE 📋
 
@@ -1571,7 +1575,7 @@ and fall back to in-process defaults when services are not present.
 - [ ] **Autonomous execution**: Agent runs without user prompt trigger
 - [ ] **Result delivery**: Push to configured channel (full/summary/diff)
 
-### Phase 15: First-Principles Security Hardening ✅
+### Phase 15: First-Principles Security Hardening (P0+P1 ✅, P2 📋)
 
 Systematic fixes for architectural defects identified through first-principles analysis.
 Every item below addresses a gap where the current implementation gives false security
