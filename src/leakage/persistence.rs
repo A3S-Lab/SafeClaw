@@ -119,9 +119,15 @@ impl AuditPersistence {
             return Ok(());
         }
 
-        // Rename active file with timestamp suffix (sub-second precision to avoid collisions)
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6f");
-        let rotated = self.dir.join(format!("events-{}.jsonl", ts));
+        // Rename active file with timestamp suffix + counter to avoid collisions
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.6f").to_string();
+        let mut rotated = self.dir.join(format!("events-{}.jsonl", ts));
+        // If the file already exists (sub-microsecond collision), append a counter
+        let mut counter = 1u32;
+        while rotated.exists() {
+            rotated = self.dir.join(format!("events-{}-{}.jsonl", ts, counter));
+            counter += 1;
+        }
         fs::rename(&self.active_path, &rotated).await.map_err(|e| {
             crate::error::Error::Internal(format!("Failed to rotate audit file: {}", e))
         })?;
