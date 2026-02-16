@@ -103,6 +103,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Bytes
 bytes = "1.5"
 
+# Concurrent hash map for per-key locking
+dashmap = "5"
+
 # OS-level hardening and TEE ioctl (Linux)
 libc = "0.2"
 

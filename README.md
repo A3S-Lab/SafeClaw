@@ -1732,10 +1732,11 @@ no unified audit trail for auth failures.
   - `Artifact`: zeroize `content` on erase
   - `Insight`: zeroize `content` on erase
   - `SecretKey`, `SessionKey`, `SharedSecret`: `#[derive(Zeroize, ZeroizeOnDrop)]` (done in 15.5)
-- [ ] **Lock granularity improvement** (deferred — adds `dashmap` dependency, low priority):
-  - `SessionManager`: Replace `RwLock<HashMap<K, V>>` with `DashMap<K, V>` for per-key locking
-  - `TaintTracker`: Same — per-session lock instead of global
-  - Keep `RwLock` for stores with low contention (PersonaStore, SettingsStore)
+- [x] **Lock granularity improvement** (DashMap per-key locking):
+  - `SessionIsolation`: Replace `Arc<RwLock<HashMap>>` with `Arc<DashMap>` for `registries` and `audit_logs`
+  - `TaintRegistryGuard` / `AuditLogGuard`: Use DashMap `get`/`get_mut` instead of global RwLock
+  - `SessionManager`: Replace `sessions` and `user_sessions` with `DashMap` for per-key locking
+  - Keep `RwLock` for per-`Session` fields and low-contention stores (PersonaStore, SettingsStore)
 - [x] **Core dump protection**: `prctl(PR_SET_DUMPABLE, 0)` on Linux at startup (behind `hardening` feature flag)
   - `hardening` module with `harden_process()` called early in `main()`
   - No-op on non-Linux platforms; requires `libc` optional dependency
@@ -1937,7 +1938,7 @@ cargo build
 
 ### Test
 
-**711 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, proactive task scheduler, a3s-event bridge, and LLM-based PII classification.
+**711 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions (DashMap per-key locking), TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, proactive task scheduler, a3s-event bridge, and LLM-based PII classification.
 
 ```bash
 cargo test

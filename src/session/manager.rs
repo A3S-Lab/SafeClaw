@@ -14,6 +14,7 @@ use crate::leakage::{
     NetworkFirewall, OutputSanitizer, SanitizeResult, SessionIsolation, ToolInterceptor,
 };
 use crate::tee::TeeRuntime;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -157,9 +158,10 @@ impl Session {
 
 /// Unified session manager handling both regular and TEE sessions.
 pub struct SessionManager {
-    sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
-    /// Sessions indexed by user_id:channel_id:chat_id
-    user_sessions: Arc<RwLock<HashMap<String, String>>>,
+    /// Active sessions indexed by session ID (DashMap for per-key locking)
+    sessions: Arc<DashMap<String, Arc<Session>>>,
+    /// Sessions indexed by user_id:channel_id:chat_id (DashMap for per-key locking)
+    user_sessions: Arc<DashMap<String, String>>,
     /// TEE configuration
     tee_config: TeeConfig,
     /// TEE runtime for self-detection and sealed storage (Phase 11)
@@ -183,8 +185,8 @@ impl SessionManager {
         let tee_runtime = Arc::new(TeeRuntime::process_only());
         let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            user_sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
+            user_sessions: Arc::new(DashMap::new()),
             tee_config,
             tee_runtime,
             isolation: Arc::new(SessionIsolation::default()),
@@ -202,8 +204,8 @@ impl SessionManager {
     ) -> Self {
         let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            user_sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
+            user_sessions: Arc::new(DashMap::new()),
             tee_config,
             tee_runtime,
             isolation: Arc::new(SessionIsolation::default()),
@@ -239,8 +241,7 @@ impl SessionManager {
 
         // Terminate all active sessions
         let sessions: Vec<Arc<Session>> = {
-            let sessions = self.sessions.read().await;
-            sessions.values().cloned().collect()
+            self.sessions.iter().map(|r| r.value().clone()).collect()
         };
 
         for session in sessions {
@@ -374,10 +375,10 @@ impl SessionManager {
         let user_key = format!("{}:{}:{}", user_id, channel_id, chat_id);
 
         // Check for existing active session
-        if let Some(session_id) = self.user_sessions.read().await.get(&user_key) {
-            if let Some(session) = self.sessions.read().await.get(session_id) {
+        if let Some(session_id) = self.user_sessions.get(&user_key) {
+            if let Some(session) = self.sessions.get(session_id.value()) {
                 if session.is_active().await {
-                    return Ok(session.clone());
+                    return Ok(session.value().clone());
                 }
             }
         }
@@ -396,14 +397,8 @@ impl SessionManager {
         self.isolation.init_session(&session.id).await;
 
         // Store session
-        self.sessions
-            .write()
-            .await
-            .insert(session_id.clone(), session.clone());
-        self.user_sessions
-            .write()
-            .await
-            .insert(user_key, session_id);
+        self.sessions.insert(session_id.clone(), session.clone());
+        self.user_sessions.insert(user_key, session_id);
 
         tracing::info!(
             "Created session {} for user {} on {}:{}",
@@ -418,7 +413,7 @@ impl SessionManager {
 
     /// Get session by ID
     pub async fn get_session(&self, session_id: &str) -> Option<Arc<Session>> {
-        self.sessions.read().await.get(session_id).cloned()
+        self.sessions.get(session_id).map(|r| r.value().clone())
     }
 
     /// Get session for user
@@ -429,7 +424,7 @@ impl SessionManager {
         chat_id: &str,
     ) -> Option<Arc<Session>> {
         let user_key = format!("{}:{}:{}", user_id, channel_id, chat_id);
-        let session_id = self.user_sessions.read().await.get(&user_key)?.clone();
+        let session_id = self.user_sessions.get(&user_key)?.value().clone();
         self.get_session(&session_id).await
     }
 
@@ -520,8 +515,8 @@ impl SessionManager {
 
     /// Terminate a session
     pub async fn terminate_session(&self, session_id: &str) -> Result<()> {
-        let session = match self.sessions.write().await.remove(session_id) {
-            Some(s) => s,
+        let session = match self.sessions.remove(session_id) {
+            Some((_, s)) => s,
             None => return Ok(()),
         };
 
@@ -532,7 +527,7 @@ impl SessionManager {
             "{}:{}:{}",
             session.user_id, session.channel_id, session.chat_id
         );
-        self.user_sessions.write().await.remove(&user_key);
+        self.user_sessions.remove(&user_key);
 
         // Securely wipe session-scoped taint data and audit log
         let wipe = self.isolation.wipe_session(session_id).await;
@@ -549,29 +544,25 @@ impl SessionManager {
 
     /// Get all active sessions
     pub async fn active_sessions(&self) -> Vec<Arc<Session>> {
-        let sessions = self.sessions.read().await;
         let mut active = Vec::new();
-
-        for session in sessions.values() {
-            if session.is_active().await {
-                active.push(session.clone());
+        for entry in self.sessions.iter() {
+            if entry.value().is_active().await {
+                active.push(entry.value().clone());
             }
         }
-
         active
     }
 
     /// Get session count
     pub async fn session_count(&self) -> usize {
-        self.sessions.read().await.len()
+        self.sessions.len()
     }
 
     /// Clean up inactive sessions
     pub async fn cleanup_inactive(&self, max_idle_ms: i64) -> Result<usize> {
         let now = chrono::Utc::now().timestamp_millis();
         let sessions: Vec<Arc<Session>> = {
-            let sessions = self.sessions.read().await;
-            sessions.values().cloned().collect()
+            self.sessions.iter().map(|r| r.value().clone()).collect()
         };
 
         let mut cleaned = 0;

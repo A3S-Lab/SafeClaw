@@ -9,9 +9,8 @@
 
 use super::audit::AuditLog;
 use super::taint::TaintRegistry;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Result of a secure memory wipe operation
 #[derive(Debug, Clone)]
@@ -33,10 +32,10 @@ pub struct WipeResult {
 /// access control and handles secure cleanup.
 #[derive(Debug)]
 pub struct SessionIsolation {
-    /// Per-session taint registries
-    registries: Arc<RwLock<HashMap<String, TaintRegistry>>>,
-    /// Per-session audit logs
-    audit_logs: Arc<RwLock<HashMap<String, AuditLog>>>,
+    /// Per-session taint registries (DashMap for per-key locking)
+    registries: Arc<DashMap<String, TaintRegistry>>,
+    /// Per-session audit logs (DashMap for per-key locking)
+    audit_logs: Arc<DashMap<String, AuditLog>>,
     /// Audit log capacity per session
     audit_capacity: usize,
 }
@@ -53,8 +52,8 @@ impl SessionIsolation {
     /// `audit_capacity` is the max audit events per session.
     pub fn new(audit_capacity: usize) -> Self {
         Self {
-            registries: Arc::new(RwLock::new(HashMap::new())),
-            audit_logs: Arc::new(RwLock::new(HashMap::new())),
+            registries: Arc::new(DashMap::new()),
+            audit_logs: Arc::new(DashMap::new()),
             audit_capacity,
         }
     }
@@ -64,13 +63,12 @@ impl SessionIsolation {
     /// Creates a fresh `TaintRegistry` and `AuditLog` scoped to this session.
     /// If the session already exists, this is a no-op.
     pub async fn init_session(&self, session_id: &str) {
-        let mut registries = self.registries.write().await;
-        registries
+        self.registries
             .entry(session_id.to_string())
             .or_insert_with(TaintRegistry::default);
 
-        let mut logs = self.audit_logs.write().await;
-        logs.entry(session_id.to_string())
+        self.audit_logs
+            .entry(session_id.to_string())
             .or_insert_with(|| AuditLog::new(self.audit_capacity));
     }
 
@@ -78,8 +76,7 @@ impl SessionIsolation {
     ///
     /// Returns `None` if the session hasn't been initialized.
     pub async fn registry(&self, session_id: &str) -> Option<TaintRegistryGuard> {
-        let registries = self.registries.read().await;
-        if registries.contains_key(session_id) {
+        if self.registries.contains_key(session_id) {
             Some(TaintRegistryGuard {
                 session_id: session_id.to_string(),
                 registries: self.registries.clone(),
@@ -93,8 +90,7 @@ impl SessionIsolation {
     ///
     /// Returns `None` if the session hasn't been initialized.
     pub async fn audit_log(&self, session_id: &str) -> Option<AuditLogGuard> {
-        let logs = self.audit_logs.read().await;
-        if logs.contains_key(session_id) {
+        if self.audit_logs.contains_key(session_id) {
             Some(AuditLogGuard {
                 session_id: session_id.to_string(),
                 audit_logs: self.audit_logs.clone(),
@@ -106,17 +102,17 @@ impl SessionIsolation {
 
     /// Check if a session has been initialized.
     pub async fn has_session(&self, session_id: &str) -> bool {
-        self.registries.read().await.contains_key(session_id)
+        self.registries.contains_key(session_id)
     }
 
     /// Get the number of active sessions.
     pub async fn session_count(&self) -> usize {
-        self.registries.read().await.len()
+        self.registries.len()
     }
 
     /// List all active session IDs.
     pub async fn session_ids(&self) -> Vec<String> {
-        self.registries.read().await.keys().cloned().collect()
+        self.registries.iter().map(|r| r.key().clone()).collect()
     }
 
     /// Securely wipe and remove all data for a session.
@@ -125,34 +121,27 @@ impl SessionIsolation {
     /// the data structures are empty. This prevents sensitive data from
     /// lingering in memory after session termination.
     pub async fn wipe_session(&self, session_id: &str) -> WipeResult {
-        let taint_entries_wiped;
-        let audit_events_wiped;
-
         // Wipe taint registry
-        {
-            let mut registries = self.registries.write().await;
-            if let Some(mut registry) = registries.remove(session_id) {
-                taint_entries_wiped = registry.len();
-                secure_wipe_registry(&mut registry);
-            } else {
-                taint_entries_wiped = 0;
-            }
-        }
+        let taint_entries_wiped = if let Some((_, mut registry)) = self.registries.remove(session_id) {
+            let count = registry.len();
+            secure_wipe_registry(&mut registry);
+            count
+        } else {
+            0
+        };
 
         // Wipe audit log
-        {
-            let mut logs = self.audit_logs.write().await;
-            if let Some(mut log) = logs.remove(session_id) {
-                audit_events_wiped = log.len();
-                secure_wipe_audit_log(&mut log);
-            } else {
-                audit_events_wiped = 0;
-            }
-        }
+        let audit_events_wiped = if let Some((_, mut log)) = self.audit_logs.remove(session_id) {
+            let count = log.len();
+            secure_wipe_audit_log(&mut log);
+            count
+        } else {
+            0
+        };
 
         // Verify removal
-        let verified = !self.registries.read().await.contains_key(session_id)
-            && !self.audit_logs.read().await.contains_key(session_id);
+        let verified = !self.registries.contains_key(session_id)
+            && !self.audit_logs.contains_key(session_id);
 
         tracing::info!(
             session_id = session_id,
@@ -184,10 +173,11 @@ impl SessionIsolation {
 /// Guard providing scoped access to a session's taint registry.
 ///
 /// Ensures the caller can only access the registry for the session
-/// they were granted access to.
+/// they were granted access to. Uses DashMap per-key locking instead
+/// of a global RwLock.
 pub struct TaintRegistryGuard {
     session_id: String,
-    registries: Arc<RwLock<HashMap<String, TaintRegistry>>>,
+    registries: Arc<DashMap<String, TaintRegistry>>,
 }
 
 impl TaintRegistryGuard {
@@ -196,8 +186,7 @@ impl TaintRegistryGuard {
     where
         F: FnOnce(&TaintRegistry) -> R,
     {
-        let registries = self.registries.read().await;
-        registries.get(&self.session_id).map(f)
+        self.registries.get(&self.session_id).map(|r| f(r.value()))
     }
 
     /// Execute a write operation on the taint registry.
@@ -205,8 +194,9 @@ impl TaintRegistryGuard {
     where
         F: FnOnce(&mut TaintRegistry) -> R,
     {
-        let mut registries = self.registries.write().await;
-        registries.get_mut(&self.session_id).map(f)
+        self.registries
+            .get_mut(&self.session_id)
+            .map(|mut r| f(r.value_mut()))
     }
 
     /// Get the session ID this guard is scoped to.
@@ -216,9 +206,11 @@ impl TaintRegistryGuard {
 }
 
 /// Guard providing scoped access to a session's audit log.
+///
+/// Uses DashMap per-key locking instead of a global RwLock.
 pub struct AuditLogGuard {
     session_id: String,
-    audit_logs: Arc<RwLock<HashMap<String, AuditLog>>>,
+    audit_logs: Arc<DashMap<String, AuditLog>>,
 }
 
 impl AuditLogGuard {
@@ -227,8 +219,7 @@ impl AuditLogGuard {
     where
         F: FnOnce(&AuditLog) -> R,
     {
-        let logs = self.audit_logs.read().await;
-        logs.get(&self.session_id).map(f)
+        self.audit_logs.get(&self.session_id).map(|r| f(r.value()))
     }
 
     /// Execute a write operation on the audit log.
@@ -236,8 +227,9 @@ impl AuditLogGuard {
     where
         F: FnOnce(&mut AuditLog) -> R,
     {
-        let mut logs = self.audit_logs.write().await;
-        logs.get_mut(&self.session_id).map(f)
+        self.audit_logs
+            .get_mut(&self.session_id)
+            .map(|mut r| f(r.value_mut()))
     }
 
     /// Get the session ID this guard is scoped to.
