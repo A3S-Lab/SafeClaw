@@ -943,6 +943,17 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
                 }),
             }]
         }
+        AgentEvent::ToolOutputDelta { id, name, delta } => {
+            vec![BrowserIncomingMessage::StreamEvent {
+                event: serde_json::json!({
+                    "type": "tool_output_delta",
+                    "tool_use_id": id,
+                    "tool_name": name,
+                    "delta": delta,
+                }),
+                parent_tool_use_id: Some(id.clone()),
+            }]
+        }
         // Suppress internal events that don't need to reach the browser
         AgentEvent::TurnStart { .. }
         | AgentEvent::ContextResolving { .. }
@@ -963,7 +974,8 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
         | AgentEvent::GoalAchieved { .. }
         | AgentEvent::ExternalTaskPending { .. }
         | AgentEvent::ExternalTaskCompleted { .. }
-        | AgentEvent::PersistenceFailed { .. } => {
+        | AgentEvent::PersistenceFailed { .. }
+        | AgentEvent::ToolOutputDelta { .. } => {
             vec![]
         }
     }
