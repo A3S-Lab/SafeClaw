@@ -110,7 +110,7 @@ pub mod tee;
 
 pub use agent::{agent_router, AgentEngine, AgentSessionStore, AgentState};
 pub use api::build_app;
-pub use config::{A3sGatewayConfig, AuditConfig, SafeClawConfig};
+pub use config::{A3sGatewayConfig, AuditConfig, EventBridgeConfig, SafeClawConfig};
 pub use error::{Error, Result};
 pub use events::{events_router, EventStore, EventsState};
 pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};

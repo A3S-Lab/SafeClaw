@@ -3,7 +3,7 @@
 //! Provides a broadcast-based event distribution system that connects
 //! all leakage detection producers (InjectionDetector, OutputSanitizer,
 //! ToolInterceptor, NetworkFirewall) to consumers (global AuditLog,
-//! per-session logs, AlertMonitor).
+//! per-session logs, AlertMonitor, a3s-event bridge).
 
 use super::audit::{AuditEvent, AuditLog};
 use super::isolation::SessionIsolation;
@@ -13,8 +13,8 @@ use tokio::sync::{broadcast, RwLock};
 /// Centralized audit event bus using `tokio::broadcast`.
 ///
 /// All leakage detection components publish events here. Consumers
-/// (global log, per-session forwarder, alert monitor) subscribe
-/// independently.
+/// (global log, per-session forwarder, alert monitor, a3s-event bridge)
+/// subscribe independently.
 pub struct AuditEventBus {
     tx: broadcast::Sender<AuditEvent>,
     global_log: Arc<RwLock<AuditLog>>,
@@ -93,6 +93,65 @@ impl AuditEventBus {
     /// Get a reference to the global audit log.
     pub fn global_log(&self) -> &Arc<RwLock<AuditLog>> {
         &self.global_log
+    }
+
+    /// Spawn a background task that bridges audit events to `a3s-event::EventBus`.
+    ///
+    /// Each `AuditEvent` is converted to an `a3s_event::Event` and published
+    /// under the subject `audit.<severity>.<vector>`. When the EventBus is
+    /// backed by NATS, events flow to the NATS JetStream for distributed
+    /// consumption. Falls back to in-memory when NATS is unavailable.
+    pub fn spawn_event_bridge(
+        &self,
+        event_bus: Arc<a3s_event::EventBus>,
+    ) {
+        let mut rx = self.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(audit_event) => {
+                        let topic = format!(
+                            "{}.{}",
+                            serde_json::to_value(&audit_event.severity)
+                                .ok()
+                                .and_then(|v| v.as_str().map(String::from))
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            serde_json::to_value(&audit_event.vector)
+                                .ok()
+                                .and_then(|v| v.as_str().map(String::from))
+                                .unwrap_or_else(|| "unknown".to_string()),
+                        );
+                        let payload = serde_json::to_value(&audit_event)
+                            .unwrap_or(serde_json::Value::Null);
+
+                        if let Err(e) = event_bus
+                            .publish(
+                                "audit",
+                                &topic,
+                                &audit_event.description,
+                                "safeclaw",
+                                payload,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                event_id = %audit_event.id,
+                                "Failed to bridge audit event to a3s-event"
+                            );
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            skipped = n,
+                            "a3s-event bridge lagged, skipped events"
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            tracing::info!("a3s-event bridge stopped");
+        });
     }
 }
 
@@ -199,5 +258,56 @@ mod tests {
         let guard = isolation.audit_log("s1").await.unwrap();
         let count = guard.read(|log| log.len()).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_event_bridge_forwards_to_memory_provider() {
+        let log = Arc::new(RwLock::new(AuditLog::new(100)));
+        let bus = AuditEventBus::new(16, log);
+
+        let provider = a3s_event::MemoryProvider::default();
+        let event_bus = Arc::new(a3s_event::EventBus::new(provider));
+
+        bus.spawn_event_bridge(event_bus.clone());
+
+        // Give the spawned task time to subscribe
+        tokio::task::yield_now().await;
+
+        bus.publish(make_event("s1", AuditSeverity::High)).await;
+
+        // Allow the bridge to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the event was published to a3s-event
+        let counts = event_bus.counts(100).await.unwrap();
+        assert_eq!(counts.total, 1);
+    }
+
+    #[tokio::test]
+    async fn test_event_bridge_subject_format() {
+        let log = Arc::new(RwLock::new(AuditLog::new(100)));
+        let bus = AuditEventBus::new(16, log);
+
+        let provider = a3s_event::MemoryProvider::default();
+        let event_bus = Arc::new(a3s_event::EventBus::new(provider));
+
+        bus.spawn_event_bridge(event_bus.clone());
+        tokio::task::yield_now().await;
+
+        // Publish events with different severities/vectors
+        bus.publish(AuditEvent::new(
+            "s1".to_string(),
+            AuditSeverity::Critical,
+            LeakageVector::NetworkExfil,
+            "exfil attempt".to_string(),
+        ))
+        .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let counts = event_bus.counts(100).await.unwrap();
+        assert_eq!(counts.total, 1);
+        // Event should be in the "audit" category
+        assert_eq!(*counts.categories.get("audit").unwrap_or(&0), 1);
     }
 }

@@ -1563,14 +1563,14 @@ Forward Human-In-The-Loop confirmation requests to chat channel users.
 - [x] **Per-channel permission policy**: `ChannelPermissionPolicy` — `trust` (auto-approve) / `strict` / `default`
 - [x] **Timeout handling**: Configurable `timeout_secs` + `timeout_action` (default: reject on timeout)
 
-### Phase 13: A3S Platform Integration (optional) 📋
+### Phase 13: A3S Platform Integration ✅
 
 Connect to A3S OS platform services when available. All integrations are config-driven
 and fall back to in-process defaults when services are not present.
 
-- [ ] **a3s-event**: Audit events → NATS (replaces in-memory broadcast bus)
-- [ ] **a3s-cron**: Scheduled autonomous task execution
-- [ ] **Session persistence**: Survive restarts via external store (Redis/SQLite)
+- [x] **a3s-event**: Audit events → NATS via `spawn_event_bridge()` on `AuditEventBus` (`EventBridgeConfig`, NATS provider with in-memory fallback)
+- [x] **a3s-cron**: Scheduled autonomous task execution (implemented in Phase 14)
+- [x] **Session persistence**: File-based with debounced writes (`AgentSessionStore`), survives restarts
 
 ### Phase 14: Proactive Task Scheduler ✅
 
@@ -1937,7 +1937,7 @@ cargo build
 
 ### Test
 
-**696 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, and proactive task scheduler.
+**701 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, proactive task scheduler, and a3s-event bridge.
 
 ```bash
 cargo test

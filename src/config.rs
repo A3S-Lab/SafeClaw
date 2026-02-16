@@ -653,7 +653,6 @@ impl ModelsConfig {
                             modalities: a3s_code::config::ModelModalities::default(),
                             cost: a3s_code::config::ModelCost::default(),
                             limit: a3s_code::config::ModelLimit::default(),
-                            scenario: None,
                         }
                     })
                     .collect();
@@ -723,6 +722,10 @@ pub struct AuditConfig {
     /// File-based audit persistence configuration
     #[serde(default)]
     pub persistence: crate::leakage::PersistenceConfig,
+
+    /// a3s-event bridge configuration (NATS integration)
+    #[serde(default)]
+    pub event_bridge: EventBridgeConfig,
 }
 
 impl Default for AuditConfig {
@@ -731,6 +734,31 @@ impl Default for AuditConfig {
             bus_capacity: 10_000,
             alert: crate::leakage::AlertConfig::default(),
             persistence: crate::leakage::PersistenceConfig::default(),
+            event_bridge: EventBridgeConfig::default(),
+        }
+    }
+}
+
+/// Configuration for bridging audit events to a3s-event (NATS/memory).
+///
+/// When enabled, all audit events are forwarded to an `a3s-event::EventBus`
+/// under the `audit.<severity>.<vector>` subject hierarchy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventBridgeConfig {
+    /// Enable the a3s-event bridge
+    pub enabled: bool,
+
+    /// NATS server URL (e.g., "nats://localhost:4222")
+    /// When empty, falls back to in-memory provider.
+    #[serde(default)]
+    pub nats_url: String,
+}
+
+impl Default for EventBridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            nats_url: String::new(),
         }
     }
 }
@@ -1001,5 +1029,29 @@ mod tests {
         assert!(config.dingtalk.is_some());
         assert!(config.wecom.is_some());
         assert!(config.telegram.is_none());
+    }
+
+    #[test]
+    fn test_event_bridge_config_default() {
+        let config = EventBridgeConfig::default();
+        assert!(!config.enabled);
+        assert!(config.nats_url.is_empty());
+    }
+
+    #[test]
+    fn test_event_bridge_config_serde() {
+        let json = serde_json::json!({
+            "enabled": true,
+            "nats_url": "nats://localhost:4222"
+        });
+        let config: EventBridgeConfig = serde_json::from_value(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.nats_url, "nats://localhost:4222");
+    }
+
+    #[test]
+    fn test_audit_config_includes_event_bridge() {
+        let config = AuditConfig::default();
+        assert!(!config.event_bridge.enabled);
     }
 }

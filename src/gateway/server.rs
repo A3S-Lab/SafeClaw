@@ -170,6 +170,45 @@ impl Gateway {
             }
         }
 
+        // Start a3s-event bridge: forward audit events to NATS (or in-memory)
+        if self.config.audit.event_bridge.enabled {
+            let nats_url = &self.config.audit.event_bridge.nats_url;
+            if nats_url.is_empty() {
+                // In-memory fallback — useful for testing or single-process
+                let provider = a3s_event::MemoryProvider::default();
+                let event_bus = Arc::new(a3s_event::EventBus::new(provider));
+                self.audit_bus.spawn_event_bridge(event_bus);
+                tracing::info!("a3s-event bridge started (in-memory provider)");
+            } else {
+                match a3s_event::NatsProvider::connect(a3s_event::NatsConfig {
+                    url: nats_url.clone(),
+                    ..Default::default()
+                })
+                .await
+                {
+                    Ok(provider) => {
+                        let event_bus = Arc::new(a3s_event::EventBus::new(provider));
+                        self.audit_bus.spawn_event_bridge(event_bus);
+                        tracing::info!(
+                            url = %nats_url,
+                            "a3s-event bridge started (NATS provider)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            url = %nats_url,
+                            error = %e,
+                            "Failed to connect to NATS for event bridge. \
+                             Falling back to in-memory provider."
+                        );
+                        let provider = a3s_event::MemoryProvider::default();
+                        let event_bus = Arc::new(a3s_event::EventBus::new(provider));
+                        self.audit_bus.spawn_event_bridge(event_bus);
+                    }
+                }
+            }
+        }
+
         // Initialize channels
         self.init_channels().await?;
 
