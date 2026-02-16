@@ -16,8 +16,8 @@ mod policy;
 pub mod semantic;
 
 pub use backend::{
-    ClassifierBackend, CompositeClassifier, CompositeResult, PiiMatch, RegexBackend,
-    SemanticBackend,
+    ClassifierBackend, CompositeClassifier, CompositeResult, LlmBackend, LlmClassifierFn,
+    PiiMatch, RegexBackend, SemanticBackend,
 };
 pub use classifier::{ClassificationResult, Classifier, Match};
 pub use compliance::{ComplianceEngine, ComplianceFramework, ComplianceRuleSet};

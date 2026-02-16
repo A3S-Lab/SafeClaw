@@ -211,6 +211,138 @@ pub struct CompositeResult {
     pub requires_tee: bool,
 }
 
+// ---------------------------------------------------------------------------
+// LLM-based classifier backend (behind `llm-classifier` feature flag)
+// ---------------------------------------------------------------------------
+
+/// Trait for invoking an LLM to classify text.
+///
+/// Decoupled from `AgentEngine` so the backend is testable with mock responses.
+#[async_trait]
+pub trait LlmClassifierFn: Send + Sync {
+    /// Send a prompt to the LLM and return the text response.
+    async fn call(&self, prompt: &str) -> Result<String, String>;
+}
+
+/// LLM-based PII classifier backend.
+///
+/// Sends text to an LLM with a structured classification prompt and parses
+/// the JSON response into `PiiMatch` results. Highest recall but slowest
+/// and most expensive — intended as the final backend in the chain.
+///
+/// **Threat model**: Catches semantic PII that regex and trigger-phrase
+/// analysis miss (e.g., "I grew up at the corner of Oak and 5th" → address).
+pub struct LlmBackend {
+    llm: Box<dyn LlmClassifierFn>,
+}
+
+impl LlmBackend {
+    /// Create a new LLM classifier backend.
+    pub fn new(llm: Box<dyn LlmClassifierFn>) -> Self {
+        Self { llm }
+    }
+
+    /// The system prompt sent to the LLM for PII classification.
+    fn classification_prompt(text: &str) -> String {
+        format!(
+            r#"You are a PII (Personally Identifiable Information) classifier. Analyze the following text and identify ALL instances of PII.
+
+For each PII found, return a JSON array of objects with these fields:
+- "rule_name": category of PII (e.g., "email", "phone", "ssn", "credit_card", "address", "name", "password", "api_key", "medical", "financial", "date_of_birth", "national_id")
+- "start": start character offset in the original text
+- "end": end character offset in the original text
+- "confidence": confidence score between 0.0 and 1.0
+- "level": sensitivity level — one of "normal", "sensitive", "highly_sensitive", "restricted"
+
+If no PII is found, return an empty array: []
+
+Respond ONLY with the JSON array, no other text.
+
+Text to analyze:
+{text}"#
+        )
+    }
+}
+
+/// A single PII match from the LLM response.
+#[derive(Debug, serde::Deserialize)]
+struct LlmPiiMatch {
+    rule_name: String,
+    start: usize,
+    end: usize,
+    #[serde(default = "default_llm_confidence")]
+    confidence: f64,
+    #[serde(default)]
+    level: String,
+}
+
+fn default_llm_confidence() -> f64 {
+    0.80
+}
+
+fn parse_level(s: &str) -> SensitivityLevel {
+    match s.to_lowercase().as_str() {
+        "critical" | "restricted" => SensitivityLevel::Critical,
+        "highly_sensitive" | "highly sensitive" => SensitivityLevel::HighlySensitive,
+        "sensitive" => SensitivityLevel::Sensitive,
+        _ => SensitivityLevel::Sensitive, // Default to sensitive for any PII
+    }
+}
+
+#[async_trait]
+impl ClassifierBackend for LlmBackend {
+    async fn classify(&self, text: &str) -> Vec<PiiMatch> {
+        let prompt = Self::classification_prompt(text);
+
+        let response = match self.llm.call(&prompt).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM classifier call failed, returning empty");
+                return Vec::new();
+            }
+        };
+
+        // Extract JSON array from response (LLM may wrap in markdown code blocks)
+        let json_str = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        match serde_json::from_str::<Vec<LlmPiiMatch>>(json_str) {
+            Ok(matches) => matches
+                .into_iter()
+                .filter(|m| m.start < text.len() && m.end <= text.len() && m.start < m.end)
+                .map(|m| PiiMatch {
+                    rule_name: format!("llm:{}", m.rule_name),
+                    level: parse_level(&m.level),
+                    start: m.start,
+                    end: m.end,
+                    confidence: m.confidence.clamp(0.0, 1.0),
+                    backend: "llm".to_string(),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    response = %json_str,
+                    "Failed to parse LLM classifier response"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn confidence_floor(&self) -> f64 {
+        0.70
+    }
+
+    fn name(&self) -> &str {
+        "llm"
+    }
+}
+
 /// Deduplicate overlapping matches by keeping the highest-confidence one.
 ///
 /// Two matches overlap if their byte ranges intersect. When they do,
@@ -392,5 +524,148 @@ mod tests {
 
         let semantic = SemanticBackend::new(crate::privacy::SemanticAnalyzer::new());
         assert_eq!(semantic.name(), "semantic");
+    }
+
+    // --- LlmBackend tests ---
+
+    /// Mock LLM that returns a canned JSON response
+    struct MockLlm {
+        response: String,
+    }
+
+    #[async_trait]
+    impl LlmClassifierFn for MockLlm {
+        async fn call(&self, _prompt: &str) -> Result<String, String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    /// Mock LLM that always fails
+    struct FailingLlm;
+
+    #[async_trait]
+    impl LlmClassifierFn for FailingLlm {
+        async fn call(&self, _prompt: &str) -> Result<String, String> {
+            Err("LLM unavailable".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_parses_response() {
+        let response = r#"[
+            {"rule_name": "email", "start": 14, "end": 30, "confidence": 0.95, "level": "sensitive"},
+            {"rule_name": "phone", "start": 42, "end": 54, "confidence": 0.88, "level": "sensitive"}
+        ]"#;
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: response.to_string(),
+        }));
+
+        let text = "Contact me at user@example.com or call 555-123-4567 please";
+        let matches = backend.classify(text).await;
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].rule_name, "llm:email");
+        assert_eq!(matches[0].backend, "llm");
+        assert_eq!(matches[1].rule_name, "llm:phone");
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_empty_response() {
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: "[]".to_string(),
+        }));
+        let matches = backend.classify("Hello world").await;
+        assert!(matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_handles_markdown_code_block() {
+        let response = "```json\n[{\"rule_name\": \"ssn\", \"start\": 0, \"end\": 11, \"confidence\": 0.9, \"level\": \"highly_sensitive\"}]\n```";
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: response.to_string(),
+        }));
+        let matches = backend.classify("123-45-6789").await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].level, SensitivityLevel::HighlySensitive);
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_handles_failure() {
+        let backend = LlmBackend::new(Box::new(FailingLlm));
+        let matches = backend.classify("test").await;
+        assert!(matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_handles_invalid_json() {
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: "not json at all".to_string(),
+        }));
+        let matches = backend.classify("test").await;
+        assert!(matches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_filters_invalid_offsets() {
+        let response = r#"[
+            {"rule_name": "email", "start": 0, "end": 5, "confidence": 0.9, "level": "sensitive"},
+            {"rule_name": "bad", "start": 100, "end": 200, "confidence": 0.9, "level": "sensitive"}
+        ]"#;
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: response.to_string(),
+        }));
+        let matches = backend.classify("hello").await;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_name, "llm:email");
+    }
+
+    #[tokio::test]
+    async fn test_llm_backend_clamps_confidence() {
+        let response =
+            r#"[{"rule_name": "x", "start": 0, "end": 3, "confidence": 1.5, "level": "sensitive"}]"#;
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: response.to_string(),
+        }));
+        let matches = backend.classify("abc").await;
+        assert_eq!(matches[0].confidence, 1.0);
+    }
+
+    #[test]
+    fn test_llm_backend_name_and_confidence() {
+        let backend = LlmBackend::new(Box::new(MockLlm {
+            response: "[]".to_string(),
+        }));
+        assert_eq!(backend.name(), "llm");
+        assert!(backend.confidence_floor() >= 0.5);
+    }
+
+    #[tokio::test]
+    async fn test_composite_with_llm_backend() {
+        let response = r#"[{"rule_name": "address", "start": 10, "end": 25, "confidence": 0.85, "level": "sensitive"}]"#;
+        let llm = LlmBackend::new(Box::new(MockLlm {
+            response: response.to_string(),
+        }));
+        let regex =
+            RegexBackend::new(default_classification_rules(), SensitivityLevel::Normal).unwrap();
+
+        let composite = CompositeClassifier::new(vec![Box::new(regex), Box::new(llm)]);
+        let result = composite
+            .classify("I live at 123 Main Street downtown")
+            .await;
+        // LLM should find the address that regex missed
+        assert!(!result.matches.is_empty());
+        assert!(result.matches.iter().any(|m| m.backend == "llm"));
+    }
+
+    #[test]
+    fn test_parse_level() {
+        assert_eq!(parse_level("critical"), SensitivityLevel::Critical);
+        assert_eq!(parse_level("restricted"), SensitivityLevel::Critical);
+        assert_eq!(
+            parse_level("highly_sensitive"),
+            SensitivityLevel::HighlySensitive
+        );
+        assert_eq!(parse_level("sensitive"), SensitivityLevel::Sensitive);
+        assert_eq!(parse_level("normal"), SensitivityLevel::Sensitive); // PII defaults to sensitive
+        assert_eq!(parse_level("unknown"), SensitivityLevel::Sensitive);
     }
 }

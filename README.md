@@ -1601,7 +1601,7 @@ Without a formal threat model, all security measures are ad-hoc guesses.
 - [x] **Annotate each leakage module** with the threat-model section it addresses (code comments linking to doc)
 - [x] **Identify uncovered vectors**: List attack paths that no current module defends
 
-#### 15.2: Pluggable PII Classifier Architecture (P0 — fixes false sense of security)
+#### 15.2: Pluggable PII Classifier Architecture (P0 — fixes false sense of security) ✅
 
 The regex-only classifier misses semantic PII (addresses in natural language, passwords
 in context, financial info in prose). This is the weakest link in the privacy chain.
@@ -1616,9 +1616,9 @@ in context, financial info in prose). This is the weakest link in the privacy ch
   ```
 - [x] **`RegexBackend`**: Wrap current `Classifier` as one backend (fast, high-precision, low-recall)
 - [x] **`SemanticBackend`**: Wrap current `SemanticAnalyzer` as second backend
-- [ ] **`LlmBackend`** (behind feature flag `llm-classifier`): Call local or remote LLM for classification
+- [x] **`LlmBackend`**: LLM-based PII classifier via `LlmClassifierFn` trait — structured prompt, JSON response parsing, markdown code block handling, invalid offset filtering, confidence clamping, graceful failure fallback
   - Structured output prompt: "Identify all PII in this text, return JSON array"
-  - Use a3s-code local service (Phase 11) or direct API call
+  - Pluggable LLM invocation via `LlmClassifierFn` trait (testable with mocks)
   - Configurable: which model, max latency, fallback to regex on timeout
 - [x] **`CompositeClassifier`**: Chain multiple backends, merge results, deduplicate by span overlap
   - Default chain: Regex → Semantic → (optional) LLM
@@ -1937,7 +1937,7 @@ cargo build
 
 ### Test
 
-**701 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, proactive task scheduler, and a3s-event bridge.
+**711 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, proactive task scheduler, a3s-event bridge, and LLM-based PII classification.
 
 ```bash
 cargo test
