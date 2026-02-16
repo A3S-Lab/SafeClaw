@@ -22,13 +22,15 @@ path = "src/main.rs"
 a3s-tools-core = { version = "0.1", path = "../tools-core" }
 a3s-lane = { version = "0.1", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
-a3s-code = { version = "0.5", path = "../code" }
+a3s-code = { version = "0.6", path = "../code/server" }
 a3s-gateway = { version = "0.1", path = "../gateway" }
 a3s-privacy = { version = "0.1", path = "../privacy" }
 a3s-event = { version = "0.1", path = "../event" }
 a3s-transport = { version = "0.1", path = "../transport" }
-a3s-box-runtime = { version = "0.2", path = "../box/src/runtime", optional = true }
 a3s-box-core = { version = "0.2", path = "../box/src/core", optional = true }
+
+# Home directory resolution for sealed storage
+dirs = "5.0"
 
 # Regex for privacy classification
 regex = "1.10"
@@ -101,24 +103,17 @@ chrono = { version = "0.4", features = ["serde"] }
 # Bytes
 bytes = "1.5"
 
-# OS-level hardening (Linux core dump protection)
-libc = { version = "0.2", optional = true }
+# OS-level hardening and TEE ioctl (Linux)
+libc = "0.2"
 
 # Agent module dependencies
 dirs-next = "2.0"
 
 [features]
 default = []
-## Enable MockTransport fallback for testing without a real TEE MicroVM.
-## Production builds should NOT enable this — use TeeOrchestrator + RA-TLS instead.
-mock-tee = []
-## Enable real TEE support via a3s-box MicroVM (requires libkrun).
-## Without this feature, TeeOrchestrator and RaTlsChannel are not compiled,
-## and SessionManager uses a stub orchestrator that returns errors.
-real-tee = ["dep:a3s-box-runtime", "dep:a3s-box-core"]
 ## Enable OS-level process hardening (core dump protection on Linux).
-## Requires libc. Safe to enable on all platforms (no-op on non-Linux).
-hardening = ["dep:libc"]
+## Safe to enable on all platforms (no-op on non-Linux).
+hardening = []
 
 [build-dependencies]
 tonic-build = "0.11"

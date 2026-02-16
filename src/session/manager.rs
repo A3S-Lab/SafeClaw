@@ -3,9 +3,9 @@
 //! Provides a single `Session` type that optionally supports TEE processing,
 //! and a `SessionManager` that handles both regular and TEE session lifecycles.
 //!
-//! TEE processing is backed by `TeeOrchestrator` which manages the A3S Box
-//! MicroVM lifecycle and RA-TLS communication. The old `TeeClient` + `MockTransport`
-//! path is retained for testing.
+//! TEE processing is backed by `TeeRuntime` which detects the TEE environment
+//! at startup (Phase 11 architecture). SafeClaw runs as a guest inside the TEE,
+//! not as a host that boots VMs.
 
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
@@ -13,11 +13,7 @@ use crate::leakage::{
     AuditEventBus, FirewallResult, InjectionDetector, InjectionVerdict, InterceptResult,
     NetworkFirewall, OutputSanitizer, SanitizeResult, SessionIsolation, ToolInterceptor,
 };
-use crate::tee::TeeOrchestrator;
-#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-use crate::tee::{TeeClient, TeeMessage, TeeResponse};
-#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-use a3s_transport::{Frame, MockTransport};
+use crate::tee::TeeRuntime;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -38,19 +34,6 @@ pub enum SessionState {
     Terminating,
     /// Session has been terminated
     Terminated,
-}
-
-/// Handle to a TEE session associated with a regular session.
-///
-/// Only available with both `mock-tee` and `real-tee` features for legacy TeeClient fallback.
-/// Production code uses `TeeOrchestrator` directly via `SessionManager`.
-#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-#[derive(Debug, Clone)]
-pub struct TeeHandle {
-    /// TEE-side session identifier
-    pub tee_session_id: String,
-    /// Client for communicating with the TEE environment
-    pub client: Arc<TeeClient>,
 }
 
 /// A user session, optionally backed by a TEE environment.
@@ -78,9 +61,6 @@ pub struct Session {
     metadata: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// Whether this session has been upgraded to TEE
     tee_active: Arc<RwLock<bool>>,
-    /// Legacy TEE handle (mock-tee feature only)
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    tee_handle: Arc<RwLock<Option<TeeHandle>>>,
 }
 
 impl Session {
@@ -99,8 +79,6 @@ impl Session {
             message_count: Arc::new(RwLock::new(0)),
             metadata: Arc::new(RwLock::new(HashMap::new())),
             tee_active: Arc::new(RwLock::new(false)),
-            #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-            tee_handle: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -170,92 +148,11 @@ impl Session {
         *self.tee_active.write().await = true;
     }
 
-    /// Legacy TEE upgrade with handle (mock-tee feature only).
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    pub async fn upgrade_to_tee(&self, handle: TeeHandle) {
-        *self.tee_handle.write().await = Some(handle);
-        *self.tee_active.write().await = true;
-    }
-
     /// Check if this session uses TEE
     pub async fn uses_tee(&self) -> bool {
         *self.tee_active.read().await
     }
 
-    /// Get a clone of the legacy TEE handle, if present (mock-tee feature only).
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    pub async fn tee_handle(&self) -> Option<TeeHandle> {
-        self.tee_handle.read().await.clone()
-    }
-
-    /// Process a message through the legacy TEE client (mock-tee feature only).
-    ///
-    /// Returns an error if the session has no TEE handle.
-    /// Production code should use `SessionManager::process_in_tee()` instead.
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    pub async fn process_in_tee(&self, content: &str) -> Result<String> {
-        let handle = self
-            .tee_handle
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| Error::Tee("Session has no TEE handle".to_string()))?;
-
-        self.set_state(SessionState::Processing).await;
-        self.touch().await;
-
-        let result = handle
-            .client
-            .process_message(&handle.tee_session_id, content)
-            .await;
-
-        self.set_state(SessionState::Active).await;
-
-        result
-    }
-}
-
-/// Create a default mock transport for testing (mock-tee feature only)
-#[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-fn create_default_mock_transport() -> Box<dyn a3s_transport::Transport> {
-    Box::new(MockTransport::with_handler(|data| {
-        // Decode the frame
-        let (frame, _) = match Frame::decode(data) {
-            Ok(Some(f)) => f,
-            _ => return vec![],
-        };
-
-        // Parse the request
-        let message: TeeMessage = match serde_json::from_slice(&frame.payload) {
-            Ok(m) => m,
-            Err(_) => return vec![],
-        };
-
-        // Generate response based on request
-        let response_msg = match message {
-            TeeMessage::Request(req) => {
-                let response = TeeResponse::success(
-                    req.id.clone(),
-                    req.session_id.clone(),
-                    serde_json::to_vec(&serde_json::json!({
-                        "content": "Response from TEE environment",
-                        "status": "ok"
-                    }))
-                    .unwrap_or_default(),
-                );
-                TeeMessage::Response(response)
-            }
-            _ => TeeMessage::Error {
-                code: 400,
-                message: "Invalid message type".to_string(),
-            },
-        };
-
-        // Serialize and frame the response
-        let response_json = serde_json::to_vec(&response_msg).unwrap_or_default();
-        let response_frame = Frame::data(response_json);
-        response_frame.encode().unwrap_or_default()
-    }))
 }
 
 /// Unified session manager handling both regular and TEE sessions.
@@ -265,11 +162,8 @@ pub struct SessionManager {
     user_sessions: Arc<RwLock<HashMap<String, String>>>,
     /// TEE configuration
     tee_config: TeeConfig,
-    /// TEE orchestrator for real MicroVM lifecycle (lazy-initialized)
-    orchestrator: Arc<TeeOrchestrator>,
-    /// Legacy TEE client for frame-based protocol (mock-tee feature only)
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    tee_client: Arc<TeeClient>,
+    /// TEE runtime for self-detection and sealed storage (Phase 11)
+    tee_runtime: Arc<TeeRuntime>,
     /// Per-session data isolation (taint registries + audit logs)
     isolation: Arc<SessionIsolation>,
     /// Prompt injection detector
@@ -283,21 +177,16 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager with TEE configuration and audit bus.
     ///
-    /// Uses `TeeOrchestrator` for real TEE communication. With the `mock-tee`
-    /// feature, also creates a `MockTransport`-backed `TeeClient` as fallback.
+    /// Uses `TeeRuntime` for environment self-detection (Phase 11).
+    /// The runtime detects TEE hardware at startup — no VM boot needed.
     pub fn new(tee_config: TeeConfig, audit_bus: Arc<AuditEventBus>) -> Self {
-        let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
+        let tee_runtime = Arc::new(TeeRuntime::process_only());
         let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
-            #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-            tee_client: {
-                let transport = create_default_mock_transport();
-                Arc::new(TeeClient::new(tee_config.clone(), transport))
-            },
             tee_config,
-            orchestrator,
+            tee_runtime,
             isolation: Arc::new(SessionIsolation::default()),
             injection_detector: Arc::new(InjectionDetector::new()),
             network_firewall,
@@ -305,22 +194,18 @@ impl SessionManager {
         }
     }
 
-    /// Create a new session manager with a custom transport (mock-tee feature only, for testing)
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    pub fn new_with_transport(
+    /// Create a new session manager with a pre-detected TEE runtime.
+    pub fn with_runtime(
         tee_config: TeeConfig,
-        transport: Box<dyn a3s_transport::Transport>,
+        tee_runtime: Arc<TeeRuntime>,
         audit_bus: Arc<AuditEventBus>,
     ) -> Self {
-        let orchestrator = Arc::new(TeeOrchestrator::new(tee_config.clone()));
-        let tee_client = Arc::new(TeeClient::new(tee_config.clone(), transport));
         let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             user_sessions: Arc::new(RwLock::new(HashMap::new())),
             tee_config,
-            orchestrator,
-            tee_client,
+            tee_runtime,
             isolation: Arc::new(SessionIsolation::default()),
             injection_detector: Arc::new(InjectionDetector::new()),
             network_firewall,
@@ -330,15 +215,17 @@ impl SessionManager {
 
     /// Initialize the TEE subsystem.
     ///
-    /// With the orchestrator, this is a no-op — the VM boots lazily on first
-    /// `upgrade_to_tee()`. Kept for backward compatibility.
+    /// With TeeRuntime, detection happens at startup. This logs the result.
     pub async fn init_tee(&self) -> Result<()> {
         if !self.tee_config.enabled {
             tracing::info!("TEE is disabled, skipping initialization");
             return Ok(());
         }
 
-        tracing::info!("TEE subsystem ready (VM will boot on first upgrade)");
+        tracing::info!(
+            level = %self.tee_runtime.security_level(),
+            "TEE runtime initialized"
+        );
         Ok(())
     }
 
@@ -350,30 +237,20 @@ impl SessionManager {
 
         tracing::info!("Shutting down TEE subsystem");
 
-        // Terminate all TEE-enabled sessions
+        // Terminate all active sessions
         let sessions: Vec<Arc<Session>> = {
             let sessions = self.sessions.read().await;
             sessions.values().cloned().collect()
         };
 
         for session in sessions {
-            if session.uses_tee().await {
-                #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-                if let Some(handle) = session.tee_handle().await {
-                    if let Err(e) = handle.client.terminate_session(&handle.tee_session_id).await {
-                        tracing::warn!(
-                            "Failed to terminate TEE session {} for session {}: {}",
-                            handle.tee_session_id,
-                            session.id,
-                            e
-                        );
-                    }
-                }
+            if session.is_active().await {
+                session.set_state(SessionState::Terminating).await;
             }
         }
 
-        // Shutdown the MicroVM
-        self.orchestrator.shutdown().await?;
+        // Shutdown the TEE runtime
+        self.tee_runtime.shutdown().await?;
 
         // Wipe all session isolation data
         self.isolation.wipe_all().await;
@@ -387,15 +264,9 @@ impl SessionManager {
         self.tee_config.enabled
     }
 
-    /// Get a reference to the TEE orchestrator
-    pub fn orchestrator(&self) -> &Arc<TeeOrchestrator> {
-        &self.orchestrator
-    }
-
-    /// Get a reference to the legacy TEE client (mock-tee feature only, for testing)
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    pub fn tee_client(&self) -> &Arc<TeeClient> {
-        &self.tee_client
+    /// Get a reference to the TEE runtime
+    pub fn tee_runtime(&self) -> &Arc<TeeRuntime> {
+        &self.tee_runtime
     }
 
     /// Get a reference to the session isolation manager
@@ -564,8 +435,8 @@ impl SessionManager {
 
     /// Upgrade an existing session to use TEE processing.
     ///
-    /// On first call, lazily boots the MicroVM, verifies attestation via RA-TLS,
-    /// and injects configured secrets. Subsequent calls reuse the running VM.
+    /// With TeeRuntime (Phase 11), this checks if the runtime detected TEE
+    /// hardware and marks the session accordingly. No VM boot needed.
     pub async fn upgrade_to_tee(&self, session_id: &str) -> Result<()> {
         if !self.tee_config.enabled {
             return Err(Error::Tee("TEE is not enabled".to_string()));
@@ -580,69 +451,40 @@ impl SessionManager {
             return Ok(()); // Already upgraded
         }
 
-        // Lazy boot: start MicroVM if not already running
-        if !self.orchestrator.is_booted().await {
-            self.orchestrator.boot().await?;
-        }
-
-        // Verify TEE attestation if not yet verified
-        if !self.orchestrator.is_ready().await {
-            self.orchestrator.verify().await?;
-
-            // Inject configured secrets after first verification
-            if !self.tee_config.secrets.is_empty() {
-                self.orchestrator
-                    .inject_secrets(&self.tee_config.secrets)
-                    .await?;
-            }
+        // Check if TEE hardware is actually available
+        if !self.tee_runtime.is_tee_active() {
+            return Err(Error::Tee(format!(
+                "Cannot upgrade to TEE: runtime security level is {} (need TeeHardware)",
+                self.tee_runtime.security_level()
+            )));
         }
 
         // Mark session as TEE-active
         session.mark_tee_active().await;
 
-        // Legacy: create TEE handle for mock-tee fallback path
-        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-        {
-            let tee_session_id = Uuid::new_v4().to_string();
-            self.tee_client
-                .init_session(&tee_session_id, &session.user_id)
-                .await?;
-
-            let handle = TeeHandle {
-                tee_session_id: tee_session_id.clone(),
-                client: self.tee_client.clone(),
-            };
-
-            session.upgrade_to_tee(handle).await;
-
-            tracing::info!(
-                "Upgraded session {} to TEE (tee_session={})",
-                session_id,
-                tee_session_id
-            );
-        }
-
-        #[cfg(not(all(feature = "mock-tee", feature = "real-tee")))]
-        tracing::info!("Upgraded session {} to TEE", session_id);
+        tracing::info!(
+            session_id = session_id,
+            level = %self.tee_runtime.security_level(),
+            "Upgraded session to TEE"
+        );
 
         Ok(())
     }
 
     /// Process a message in TEE for the given session.
     ///
-    /// Scans input for prompt injection before forwarding. Routes through the
-    /// orchestrator's RA-TLS channel. With `mock-tee` feature, falls back to
-    /// the legacy TeeClient path if the orchestrator isn't ready.
+    /// Scans input for prompt injection before processing. With TeeRuntime
+    /// (Phase 11), the message is processed in the current TEE environment
+    /// rather than being forwarded to a separate VM.
     pub async fn process_in_tee(&self, session_id: &str, content: &str) -> Result<String> {
         let session = self
             .get_session(session_id)
             .await
             .ok_or_else(|| Error::Tee(format!("Session {} not found", session_id)))?;
 
-        // Prompt injection defense: scan input before forwarding
+        // Prompt injection defense: scan input before processing
         let injection_result = self.injection_detector.scan(content, session_id);
         if injection_result.verdict == InjectionVerdict::Blocked {
-            // Publish audit events to centralized bus (writes to global log + broadcasts)
             self.audit_bus
                 .publish_all(injection_result.audit_events)
                 .await;
@@ -659,31 +501,21 @@ impl SessionManager {
                 .await;
         }
 
-        // Route through orchestrator's RA-TLS channel
-        if self.orchestrator.is_ready().await {
-            session.set_state(SessionState::Processing).await;
-            session.touch().await;
-
-            let result = self
-                .orchestrator
-                .process_message(session_id, content)
-                .await;
-
-            session.set_state(SessionState::Active).await;
-
-            return result.map(|r| r.content);
+        if !self.tee_runtime.is_tee_active() {
+            return Err(Error::Tee(
+                "TEE runtime not active — cannot process in TEE".to_string(),
+            ));
         }
 
-        // Fallback: legacy TeeClient path (mock-tee feature only)
-        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-        {
-            return session.process_in_tee(content).await;
-        }
+        session.set_state(SessionState::Processing).await;
+        session.touch().await;
 
-        #[cfg(not(all(feature = "mock-tee", feature = "real-tee")))]
-        Err(Error::Tee(
-            "TEE orchestrator not ready and mock-tee fallback is disabled".to_string(),
-        ))
+        // In Phase 11, processing happens in the current TEE environment.
+        // The actual LLM call is handled by AgentEngine (in-process a3s-code).
+        // This method validates TEE state and injection safety.
+        session.set_state(SessionState::Active).await;
+
+        Ok(content.to_string())
     }
 
     /// Terminate a session
@@ -694,19 +526,6 @@ impl SessionManager {
         };
 
         session.set_state(SessionState::Terminating).await;
-
-        // Clean up legacy TEE handle if present (mock-tee feature only)
-        #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-        if let Some(handle) = session.tee_handle().await {
-            if let Err(e) = handle.client.terminate_session(&handle.tee_session_id).await {
-                tracing::warn!(
-                    "Failed to terminate TEE session {} for session {}: {}",
-                    handle.tee_session_id,
-                    session_id,
-                    e
-                );
-            }
-        }
 
         // Remove from user sessions
         let user_key = format!(
@@ -1065,160 +884,135 @@ mod tests {
         }
     }
 
-    // ---- Mock-TEE tests (require mock-tee feature) ----
+    // ---- TeeRuntime integration tests ----
 
-    #[cfg(all(feature = "mock-tee", feature = "real-tee"))]
-    mod mock_tee_tests {
-        use super::*;
+    #[tokio::test]
+    async fn test_manager_with_runtime() {
+        use crate::tee::{SecurityLevel, TeeRuntime};
 
-        #[tokio::test]
-        async fn test_session_upgrade_to_tee() {
-            let session = Session::new(
-                "user-123".to_string(),
-                "telegram".to_string(),
-                "chat-456".to_string(),
-            );
+        let runtime = Arc::new(TeeRuntime::with_level(SecurityLevel::ProcessOnly));
+        let config = TeeConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = SessionManager::with_runtime(config, runtime.clone(), test_bus());
 
-            assert!(!session.uses_tee().await);
+        assert!(manager.is_tee_enabled());
+        assert_eq!(
+            manager.tee_runtime().security_level(),
+            SecurityLevel::ProcessOnly
+        );
+    }
 
-            let config = TeeConfig::default();
-            let transport = create_default_mock_transport();
-            let client = Arc::new(TeeClient::new(config, transport));
-            let handle = TeeHandle {
-                tee_session_id: "tee-001".to_string(),
-                client,
-            };
+    #[tokio::test]
+    async fn test_manager_upgrade_fails_without_tee_hardware() {
+        use crate::tee::{SecurityLevel, TeeRuntime};
 
-            session.upgrade_to_tee(handle).await;
+        // ProcessOnly runtime — upgrade should fail
+        let runtime = Arc::new(TeeRuntime::with_level(SecurityLevel::ProcessOnly));
+        let config = TeeConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = SessionManager::with_runtime(config, runtime, test_bus());
 
-            assert!(session.uses_tee().await);
-            let h = session.tee_handle().await.unwrap();
-            assert_eq!(h.tee_session_id, "tee-001");
-        }
+        let session = manager
+            .create_session("user-123", "telegram", "chat-456")
+            .await
+            .unwrap();
 
-        #[tokio::test]
-        async fn test_session_upgrade_works_through_arc() {
-            let session = Arc::new(Session::new(
-                "user-123".to_string(),
-                "telegram".to_string(),
-                "chat-456".to_string(),
-            ));
+        let result = manager.upgrade_to_tee(&session.id).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("need TeeHardware"));
+    }
 
-            assert!(!session.uses_tee().await);
+    #[tokio::test]
+    async fn test_manager_process_in_tee_fails_without_hardware() {
+        use crate::tee::{SecurityLevel, TeeRuntime};
 
-            let config = TeeConfig::default();
-            let transport = create_default_mock_transport();
-            let client = Arc::new(TeeClient::new(config, transport));
-            let handle = TeeHandle {
-                tee_session_id: "tee-002".to_string(),
-                client,
-            };
+        let runtime = Arc::new(TeeRuntime::with_level(SecurityLevel::ProcessOnly));
+        let config = TeeConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = SessionManager::with_runtime(config, runtime, test_bus());
 
-            session.upgrade_to_tee(handle).await;
-            assert!(session.uses_tee().await);
-        }
+        let session = manager
+            .create_session("user-123", "telegram", "chat-456")
+            .await
+            .unwrap();
 
-        #[tokio::test]
-        async fn test_session_process_in_tee_without_handle() {
-            let session = Session::new(
-                "user-123".to_string(),
-                "telegram".to_string(),
-                "chat-456".to_string(),
-            );
+        let result = manager
+            .process_in_tee(&session.id, "hello from TEE")
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not active"));
+    }
 
-            let result = session.process_in_tee("hello").await;
-            assert!(result.is_err());
-        }
+    #[tokio::test]
+    async fn test_manager_init_tee_logs_level() {
+        use crate::tee::{SecurityLevel, TeeRuntime};
 
-        #[tokio::test]
-        async fn test_manager_upgrade_to_tee() {
-            let config = TeeConfig {
-                enabled: true,
-                ..Default::default()
-            };
-            let manager = make_manager(config);
-            manager.tee_client.connect().await.unwrap();
+        let runtime = Arc::new(TeeRuntime::with_level(SecurityLevel::VmIsolation));
+        let config = TeeConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = SessionManager::with_runtime(config, runtime, test_bus());
 
-            let session = manager
-                .create_session("user-123", "telegram", "chat-456")
-                .await
-                .unwrap();
+        // Should succeed without error (just logs)
+        manager.init_tee().await.unwrap();
+    }
 
-            assert!(!session.uses_tee().await);
+    #[tokio::test]
+    async fn test_manager_shutdown_tee() {
+        use crate::tee::{SecurityLevel, TeeRuntime};
 
-            manager.upgrade_to_tee(&session.id).await.unwrap();
+        let runtime = Arc::new(TeeRuntime::with_level(SecurityLevel::ProcessOnly));
+        let config = TeeConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let manager = SessionManager::with_runtime(config, runtime, test_bus());
 
-            assert!(session.uses_tee().await);
-            assert!(session.tee_handle().await.is_some());
-        }
+        let session = manager
+            .create_session("user-123", "telegram", "chat-456")
+            .await
+            .unwrap();
+        assert!(session.is_active().await);
 
-        #[tokio::test]
-        async fn test_manager_upgrade_idempotent() {
-            let config = TeeConfig {
-                enabled: true,
-                ..Default::default()
-            };
-            let manager = make_manager(config);
-            manager.tee_client.connect().await.unwrap();
+        manager.shutdown_tee().await.unwrap();
 
-            let session = manager
-                .create_session("user-123", "telegram", "chat-456")
-                .await
-                .unwrap();
+        // Session should be marked as terminating
+        assert_eq!(session.state().await, SessionState::Terminating);
+    }
 
-            manager.upgrade_to_tee(&session.id).await.unwrap();
-            let handle1 = session.tee_handle().await.unwrap();
+    #[tokio::test]
+    async fn test_manager_terminate_session_wipes_isolation() {
+        let manager = SessionManager::default();
 
-            // Second upgrade should be a no-op
-            manager.upgrade_to_tee(&session.id).await.unwrap();
-            let handle2 = session.tee_handle().await.unwrap();
+        let session = manager
+            .create_session("user-123", "telegram", "chat-456")
+            .await
+            .unwrap();
+        let session_id = session.id.clone();
 
-            assert_eq!(handle1.tee_session_id, handle2.tee_session_id);
-        }
-
-        #[tokio::test]
-        async fn test_manager_process_in_tee() {
-            let config = TeeConfig {
-                enabled: true,
-                ..Default::default()
-            };
-            let manager = make_manager(config);
-            manager.tee_client.connect().await.unwrap();
-
-            let session = manager
-                .create_session("user-123", "telegram", "chat-456")
-                .await
-                .unwrap();
-
-            manager.upgrade_to_tee(&session.id).await.unwrap();
-
-            let result = manager
-                .process_in_tee(&session.id, "hello from TEE")
+        // Register some tainted data
+        if let Some(guard) = manager.isolation().registry(&session_id).await {
+            guard
+                .write(|registry| {
+                    registry.register("secret-data", crate::leakage::TaintType::ApiKey);
+                })
                 .await;
-            assert!(result.is_ok());
         }
 
-        #[tokio::test]
-        async fn test_manager_terminate_tee_session() {
-            let config = TeeConfig {
-                enabled: true,
-                ..Default::default()
-            };
-            let manager = make_manager(config);
-            manager.tee_client.connect().await.unwrap();
-
-            let session = manager
-                .create_session("user-123", "telegram", "chat-456")
-                .await
-                .unwrap();
-            let session_id = session.id.clone();
-
-            manager.upgrade_to_tee(&session_id).await.unwrap();
-            assert!(session.uses_tee().await);
-
-            // Terminate should clean up TEE handle too
-            manager.terminate_session(&session_id).await.unwrap();
-            assert!(manager.get_session(&session_id).await.is_none());
-        }
+        manager.terminate_session(&session_id).await.unwrap();
+        assert!(manager.get_session(&session_id).await.is_none());
     }
 }

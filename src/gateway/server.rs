@@ -3,11 +3,11 @@
 use crate::agent::AgentEngine;
 use crate::channels::{
     ChannelAdapter, ChannelEvent, DingTalkAdapter, DiscordAdapter, FeishuAdapter, SlackAdapter,
-    TelegramAdapter, WeComAdapter, WebChatAdapter,
+    TelegramAdapter, WeComAdapter, WebChatAdapter, supervisor,
 };
 use crate::config::SafeClawConfig;
 use crate::error::{Error, Result};
-use crate::leakage::{AlertMonitor, AuditEventBus, AuditLog};
+use crate::leakage::{AlertMonitor, AuditEventBus, AuditLog, AuditPersistence};
 use crate::privacy::{Classifier, PolicyEngine};
 use crate::session::{SessionManager, SessionRouter};
 use serde::Serialize;
@@ -109,6 +109,17 @@ impl Gateway {
         // Initialize TEE subsystem
         if self.config.tee.enabled {
             self.session_manager.init_tee().await?;
+
+            // Warn if TEE is expected but hardware is unavailable
+            let level = self.security_level();
+            if level != crate::tee::SecurityLevel::TeeHardware {
+                tracing::warn!(
+                    security_level = %level,
+                    fallback_policy = ?self.config.tee.fallback_policy,
+                    "TEE enabled in config but hardware TEE not detected. \
+                     Sensitive data routing will use fallback policy."
+                );
+            }
         }
 
         // Start audit event pipeline: session forwarder + alert monitor
@@ -116,6 +127,47 @@ impl Gateway {
             .spawn_session_forwarder(self.session_manager.isolation().clone());
         if self.config.audit.alert.enabled {
             self.alert_monitor.spawn(self.audit_bus.subscribe());
+        }
+
+        // Start audit persistence: load history + subscribe for new events
+        if self.config.audit.persistence.enabled {
+            match AuditPersistence::new(
+                &self.config.storage.base_dir,
+                self.config.audit.persistence.clone(),
+            )
+            .await
+            {
+                Ok(persistence) => {
+                    // Restore persisted events into the in-memory log
+                    let restored = persistence
+                        .load_recent(self.config.audit.bus_capacity)
+                        .await;
+                    if !restored.is_empty() {
+                        let mut log = self.global_audit_log.write().await;
+                        for event in &restored {
+                            log.record(event.clone());
+                        }
+                        tracing::info!(
+                            count = restored.len(),
+                            "Restored audit events from disk"
+                        );
+                    }
+
+                    // Subscribe to bus for ongoing persistence
+                    let persistence = std::sync::Arc::new(persistence);
+                    crate::leakage::persistence::spawn_persistence_subscriber(
+                        self.audit_bus.subscribe(),
+                        persistence,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize audit persistence: {}. \
+                         Audit events will NOT survive restarts.",
+                        e
+                    );
+                }
+            }
         }
 
         // Initialize channels
@@ -170,60 +222,65 @@ impl Gateway {
         Ok(())
     }
 
-    /// Initialize channel adapters
+    /// Initialize channel adapters with supervised restart.
+    ///
+    /// Each channel is wrapped in a supervisor that automatically restarts
+    /// on failure with exponential backoff (2s → 60s cap).
     async fn init_channels(&self) -> Result<()> {
         let mut channels = self.channels.write().await;
 
-        // Initialize Telegram if configured
-        if let Some(telegram_config) = &self.config.channels.telegram {
-            let adapter = Arc::new(TelegramAdapter::new(telegram_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("telegram".to_string(), adapter);
+        // Helper: register and supervise a channel adapter.
+        macro_rules! init_channel {
+            ($config_opt:expr, $name:expr, $adapter_expr:expr) => {
+                if let Some(config) = $config_opt {
+                    let adapter: Arc<dyn ChannelAdapter> = Arc::new($adapter_expr(config.clone()));
+                    supervisor::spawn_supervised(adapter.clone(), self.event_tx.clone());
+                    channels.insert($name.to_string(), adapter);
+                }
+            };
         }
 
-        // Initialize WebChat if configured
+        init_channel!(
+            &self.config.channels.telegram,
+            "telegram",
+            TelegramAdapter::new
+        );
+
+        // WebChat has an extra `enabled` check.
         if let Some(webchat_config) = &self.config.channels.webchat {
             if webchat_config.enabled {
-                let adapter = Arc::new(WebChatAdapter::new(webchat_config.clone()));
-                adapter.start(self.event_tx.clone()).await?;
+                let adapter: Arc<dyn ChannelAdapter> =
+                    Arc::new(WebChatAdapter::new(webchat_config.clone()));
+                supervisor::spawn_supervised(adapter.clone(), self.event_tx.clone());
                 channels.insert("webchat".to_string(), adapter);
             }
         }
 
-        // Initialize Feishu if configured
-        if let Some(feishu_config) = &self.config.channels.feishu {
-            let adapter = Arc::new(FeishuAdapter::new(feishu_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("feishu".to_string(), adapter);
-        }
-
-        // Initialize DingTalk if configured
-        if let Some(dingtalk_config) = &self.config.channels.dingtalk {
-            let adapter = Arc::new(DingTalkAdapter::new(dingtalk_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("dingtalk".to_string(), adapter);
-        }
-
-        // Initialize WeCom if configured
-        if let Some(wecom_config) = &self.config.channels.wecom {
-            let adapter = Arc::new(WeComAdapter::new(wecom_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("wecom".to_string(), adapter);
-        }
-
-        // Initialize Slack if configured
-        if let Some(slack_config) = &self.config.channels.slack {
-            let adapter = Arc::new(SlackAdapter::new(slack_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("slack".to_string(), adapter);
-        }
-
-        // Initialize Discord if configured
-        if let Some(discord_config) = &self.config.channels.discord {
-            let adapter = Arc::new(DiscordAdapter::new(discord_config.clone()));
-            adapter.start(self.event_tx.clone()).await?;
-            channels.insert("discord".to_string(), adapter);
-        }
+        init_channel!(
+            &self.config.channels.feishu,
+            "feishu",
+            FeishuAdapter::new
+        );
+        init_channel!(
+            &self.config.channels.dingtalk,
+            "dingtalk",
+            DingTalkAdapter::new
+        );
+        init_channel!(
+            &self.config.channels.wecom,
+            "wecom",
+            WeComAdapter::new
+        );
+        init_channel!(
+            &self.config.channels.slack,
+            "slack",
+            SlackAdapter::new
+        );
+        init_channel!(
+            &self.config.channels.discord,
+            "discord",
+            DiscordAdapter::new
+        );
 
         Ok(())
     }
@@ -407,6 +464,14 @@ impl Gateway {
         &self.channels
     }
 
+    /// Get the current TEE security level.
+    ///
+    /// Delegates to the TEE runtime. Returns `ProcessOnly` when no TEE
+    /// hardware is detected.
+    pub fn security_level(&self) -> crate::tee::SecurityLevel {
+        self.session_manager.tee_runtime().security_level()
+    }
+
     /// Get event sender for injecting external events (e.g., from a3s-gateway webhooks)
     pub fn event_sender(&self) -> &mpsc::Sender<ChannelEvent> {
         &self.event_tx
@@ -554,6 +619,7 @@ impl Gateway {
         GatewayStatus {
             state: format!("{:?}", state),
             tee_enabled: self.config.tee.enabled,
+            security_level: self.security_level(),
             session_count,
             channels,
             a3s_gateway_mode: self.config.a3s_gateway.enabled,
@@ -581,6 +647,8 @@ pub struct GatewayStatus {
     pub state: String,
     /// Whether TEE is enabled
     pub tee_enabled: bool,
+    /// Actual TEE security level detected at runtime
+    pub security_level: crate::tee::SecurityLevel,
     /// Number of active sessions
     pub session_count: usize,
     /// Active channel names
