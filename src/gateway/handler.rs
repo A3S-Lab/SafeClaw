@@ -42,13 +42,15 @@ impl ApiHandler {
 struct HealthResponse {
     status: String,
     version: String,
+    security_level: crate::tee::SecurityLevel,
 }
 
 /// Health check endpoint
-async fn health_check() -> impl IntoResponse {
+async fn health_check(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        security_level: gateway.security_level(),
     })
 }
 
@@ -63,6 +65,8 @@ async fn service_discovery() -> impl IntoResponse {
 struct StatusResponse {
     state: String,
     tee_enabled: bool,
+    security_level: crate::tee::SecurityLevel,
+    tee_available: bool,
     session_count: usize,
     channels: Vec<String>,
 }
@@ -71,10 +75,13 @@ struct StatusResponse {
 async fn get_status(State(gateway): State<Arc<Gateway>>) -> impl IntoResponse {
     let state = gateway.state().await;
     let session_count = gateway.session_manager().session_count().await;
+    let security_level = gateway.security_level();
 
     Json(StatusResponse {
         state: format!("{:?}", state),
         tee_enabled: gateway.config().tee.enabled,
+        security_level,
+        tee_available: security_level == crate::tee::SecurityLevel::TeeHardware,
         session_count,
         channels: gateway.active_channel_names().await,
     })
@@ -194,10 +201,12 @@ async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::GatewayBuilder;
 
     #[tokio::test]
     async fn test_health_check() {
-        let response = health_check().await.into_response();
+        let gateway = Arc::new(GatewayBuilder::new().build().unwrap());
+        let response = health_check(State(gateway)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -205,5 +214,28 @@ mod tests {
     async fn test_service_discovery() {
         let response = service_discovery().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_includes_security_level() {
+        let gateway = Arc::new(GatewayBuilder::new().build().unwrap());
+        let response = health_check(State(gateway)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["security_level"], "process_only");
+    }
+
+    #[tokio::test]
+    async fn test_status_includes_security_level() {
+        let gateway = Arc::new(GatewayBuilder::new().build().unwrap());
+        let response = get_status(State(gateway)).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["security_level"], "process_only");
+        assert_eq!(json["tee_available"], false);
     }
 }

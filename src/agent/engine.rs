@@ -962,7 +962,8 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
         | AgentEvent::GoalProgress { .. }
         | AgentEvent::GoalAchieved { .. }
         | AgentEvent::ExternalTaskPending { .. }
-        | AgentEvent::ExternalTaskCompleted { .. } => {
+        | AgentEvent::ExternalTaskCompleted { .. }
+        | AgentEvent::PersistenceFailed { .. } => {
             vec![]
         }
     }

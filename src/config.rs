@@ -334,6 +334,12 @@ pub struct TeeConfig {
     /// Network firewall policy for outbound connections
     #[serde(default)]
     pub network_policy: crate::leakage::NetworkPolicy,
+
+    /// Fallback policy when TEE is expected but unavailable.
+    /// Controls how the policy engine handles `ProcessInTee` decisions
+    /// when the security level is `ProcessOnly`.
+    #[serde(default)]
+    pub fallback_policy: TeeFallbackPolicy,
 }
 
 /// Reference to a secret to inject into the TEE
@@ -370,7 +376,32 @@ impl Default for TeeConfig {
             workspace_dir: None,
             socket_dir: None,
             network_policy: crate::leakage::NetworkPolicy::default(),
+            fallback_policy: TeeFallbackPolicy::default(),
         }
+    }
+}
+
+/// Policy for handling `ProcessInTee` decisions when TEE is unavailable.
+///
+/// Controls the security/availability tradeoff when the system detects
+/// that TEE hardware is not present but the policy engine would route
+/// data to the TEE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeeFallbackPolicy {
+    /// Reject processing of sensitive data when TEE is unavailable.
+    /// Most secure — no silent degradation.
+    Reject,
+    /// Allow processing with a warning in the audit log.
+    /// Balances security and availability.
+    Warn,
+    /// Allow processing silently (current behavior, least secure).
+    Allow,
+}
+
+impl Default for TeeFallbackPolicy {
+    fn default() -> Self {
+        Self::Warn
     }
 }
 
@@ -683,6 +714,10 @@ pub struct AuditConfig {
 
     /// Alert monitor configuration
     pub alert: crate::leakage::AlertConfig,
+
+    /// File-based audit persistence configuration
+    #[serde(default)]
+    pub persistence: crate::leakage::PersistenceConfig,
 }
 
 impl Default for AuditConfig {
@@ -690,6 +725,7 @@ impl Default for AuditConfig {
         Self {
             bus_capacity: 10_000,
             alert: crate::leakage::AlertConfig::default(),
+            persistence: crate::leakage::PersistenceConfig::default(),
         }
     }
 }

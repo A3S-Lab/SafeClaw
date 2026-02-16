@@ -119,6 +119,50 @@ impl PolicyEngine {
             PolicyDecision::ProcessInTee
         )
     }
+
+    /// Evaluate a policy decision with TEE security level awareness.
+    ///
+    /// When the base policy returns `ProcessInTee` but the actual security
+    /// level is `ProcessOnly`, the fallback policy determines the outcome:
+    ///
+    /// - `Reject`: `HighlySensitive`/`Critical` → `Reject`, `Sensitive` → `RequireConfirmation`
+    /// - `Warn`: `HighlySensitive`/`Critical` → `RequireConfirmation`, others → `ProcessLocal`
+    /// - `Allow`: silently downgrade to `ProcessLocal`
+    pub fn evaluate_with_security_level(
+        &self,
+        level: SensitivityLevel,
+        data_type: Option<&str>,
+        policy_name: Option<&str>,
+        security_level: crate::tee::SecurityLevel,
+        fallback: crate::config::TeeFallbackPolicy,
+    ) -> PolicyDecision {
+        let decision = self.evaluate(level, data_type, policy_name);
+
+        // If TEE is available or the decision doesn't require TEE, no change.
+        if security_level == crate::tee::SecurityLevel::TeeHardware
+            || decision != PolicyDecision::ProcessInTee
+        {
+            return decision;
+        }
+
+        // TEE required but not available — apply fallback policy.
+        match fallback {
+            crate::config::TeeFallbackPolicy::Reject => match level {
+                SensitivityLevel::HighlySensitive | SensitivityLevel::Critical => {
+                    PolicyDecision::Reject
+                }
+                SensitivityLevel::Sensitive => PolicyDecision::RequireConfirmation,
+                _ => PolicyDecision::ProcessLocal,
+            },
+            crate::config::TeeFallbackPolicy::Warn => match level {
+                SensitivityLevel::HighlySensitive | SensitivityLevel::Critical => {
+                    PolicyDecision::RequireConfirmation
+                }
+                _ => PolicyDecision::ProcessLocal,
+            },
+            crate::config::TeeFallbackPolicy::Allow => PolicyDecision::ProcessLocal,
+        }
+    }
 }
 
 impl Default for PolicyEngine {
@@ -245,5 +289,161 @@ mod tests {
         assert!(!engine.requires_tee(SensitivityLevel::Normal));
         assert!(engine.requires_tee(SensitivityLevel::Sensitive));
         assert!(engine.requires_tee(SensitivityLevel::HighlySensitive));
+    }
+
+    #[test]
+    fn test_evaluate_with_tee_available() {
+        use crate::config::TeeFallbackPolicy;
+        use crate::tee::SecurityLevel;
+
+        let engine = PolicyEngine::new();
+
+        // When TEE hardware is available, no fallback needed
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::HighlySensitive,
+                None,
+                None,
+                SecurityLevel::TeeHardware,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::ProcessInTee
+        );
+    }
+
+    #[test]
+    fn test_evaluate_fallback_reject() {
+        use crate::config::TeeFallbackPolicy;
+        use crate::tee::SecurityLevel;
+
+        let engine = PolicyEngine::new();
+
+        // Critical/HighlySensitive → Reject when TEE unavailable
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Critical,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::Reject
+        );
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::HighlySensitive,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::Reject
+        );
+
+        // Sensitive → RequireConfirmation
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Sensitive,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::RequireConfirmation
+        );
+
+        // Normal → ProcessLocal (doesn't require TEE anyway)
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Normal,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::ProcessLocal
+        );
+    }
+
+    #[test]
+    fn test_evaluate_fallback_warn() {
+        use crate::config::TeeFallbackPolicy;
+        use crate::tee::SecurityLevel;
+
+        let engine = PolicyEngine::new();
+
+        // Critical → RequireConfirmation (not reject)
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Critical,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Warn,
+            ),
+            PolicyDecision::RequireConfirmation
+        );
+
+        // Sensitive → ProcessLocal
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Sensitive,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Warn,
+            ),
+            PolicyDecision::ProcessLocal
+        );
+    }
+
+    #[test]
+    fn test_evaluate_fallback_allow() {
+        use crate::config::TeeFallbackPolicy;
+        use crate::tee::SecurityLevel;
+
+        let engine = PolicyEngine::new();
+
+        // Everything silently downgrades to ProcessLocal
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Critical,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Allow,
+            ),
+            PolicyDecision::ProcessLocal
+        );
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::HighlySensitive,
+                None,
+                None,
+                SecurityLevel::ProcessOnly,
+                TeeFallbackPolicy::Allow,
+            ),
+            PolicyDecision::ProcessLocal
+        );
+    }
+
+    #[test]
+    fn test_evaluate_vm_isolation_still_degrades() {
+        use crate::config::TeeFallbackPolicy;
+        use crate::tee::SecurityLevel;
+
+        let engine = PolicyEngine::new();
+
+        // VmIsolation is NOT TeeHardware, so fallback applies
+        assert_eq!(
+            engine.evaluate_with_security_level(
+                SensitivityLevel::Critical,
+                None,
+                None,
+                SecurityLevel::VmIsolation,
+                TeeFallbackPolicy::Reject,
+            ),
+            PolicyDecision::Reject
+        );
     }
 }

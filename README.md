@@ -259,7 +259,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 - **Secure Channels**: X25519 key exchange + AES-256-GCM encryption
 - **Memory System**: Three-layer data hierarchy — Resources (raw content), Artifacts (structured knowledge), Insights (cross-conversation synthesis)
 - **Desktop UI**: Tauri v2 + React + TypeScript native desktop application
-- **609 tests**
+- **656 tests**
 
 ## Quick Start
 
@@ -1551,14 +1551,14 @@ inside an A3S Box VM. A3S Code runs as a separate local service in the same VM.
 - [ ] **Refactor `SessionManager`**: Remove orchestrator wiring, use `TeeRuntime`
 - [ ] **Feature flag cleanup**: `real-tee` flag for `a3s-box-core` sealed storage; `mock-tee` for testing
 
-### Phase 12: HITL in Chat Channels 📋
+### Phase 12: HITL in Chat Channels ✅
 
 Forward Human-In-The-Loop confirmation requests to chat channel users.
 
-- [ ] **Confirmation forwarding**: `ConfirmationRequired` → channel message with approve/reject
-- [ ] **Response parsing**: `yes`/`no`/`approve`/`reject`/`/allow`/`/deny`
-- [ ] **Per-channel permission policy**: `trust`/`strict`/`default` per channel
-- [ ] **Timeout handling**: Configurable default action on HITL timeout
+- [x] **Confirmation forwarding**: `ConfirmationManager::request_confirmation()` sends formatted prompt to channel, waits for response
+- [x] **Response parsing**: `yes`/`no`/`approve`/`reject`/`allow`/`deny`/`/allow`/`/deny`/`y`/`n`
+- [x] **Per-channel permission policy**: `ChannelPermissionPolicy` — `trust` (auto-approve) / `strict` / `default`
+- [x] **Timeout handling**: Configurable `timeout_secs` + `timeout_action` (default: reject on timeout)
 
 ### Phase 13: A3S Platform Integration (optional) 📋
 
@@ -1585,7 +1585,7 @@ guarantees or fails to match the stated threat model.
 > runtime*. Every change in this phase must close a real gap in that promise — no
 > feature creep, no nice-to-haves.
 
-#### 15.1: Threat Model Document (P0 — prerequisite for everything else)
+#### 15.1: Threat Model Document (P0 — prerequisite for everything else) ✅
 
 Without a formal threat model, all security measures are ad-hoc guesses.
 
@@ -1622,7 +1622,7 @@ in context, financial info in prose). This is the weakest link in the privacy ch
 - [x] **Explicit accuracy labeling**: `ClassificationResult` includes `backend: String` field so audit log shows which classifier caught it
 - [x] **False-negative documentation**: README clearly states regex-only mode limitations
 
-#### 15.3: Stateful Privacy Gate — Cumulative Leakage Tracking (P1)
+#### 15.3: Stateful Privacy Gate — Cumulative Leakage Tracking (P1) ✅
 
 Current `PrivacyGate` is stateless per-message. An attacker can leak PII across
 multiple messages ("I live in..." + "...Chaoyang District" + "...Wangjing SOHO").
@@ -1638,7 +1638,7 @@ multiple messages ("I live in..." + "...Chaoyang District" + "...Wangjing SOHO")
   - Information entropy budget per session (research-grade, optional)
 - [x] **Session risk reset**: Explicit user action or session expiry clears accumulated risk
 
-#### 15.4: Taint Propagation Completeness (P1 — fixes broken data flow tracking)
+#### 15.4: Taint Propagation Completeness (P1 — fixes broken data flow tracking) ✅
 
 Taint labels are assigned at input but lost during internal transformations.
 
@@ -1657,7 +1657,7 @@ Taint labels are assigned at input but lost during internal transformations.
   - `LeakageVector::AuthFailure` added for channel auth failure auditing
   - Serialized as `taintLabels` (camelCase), skipped when empty
 
-#### 15.5: Replace Custom Key Derivation with HKDF (P0 — crypto fix)
+#### 15.5: Replace Custom Key Derivation with HKDF (P0 — crypto fix) ✅
 
 `derive_session_key()` uses raw `SHA-256(shared || local_pub || remote_pub)`.
 This is non-standard and unreviewed.
@@ -1682,7 +1682,7 @@ This is non-standard and unreviewed.
   - Long-term `KeyPair` used only for identity/signing, not key exchange
 - [x] **Zeroize sensitive material**: Derive `zeroize::Zeroize` on `SecretKey`, `SessionKey`, shared secret intermediates
 
-#### 15.6: Unified Channel Authentication Middleware (P1)
+#### 15.6: Unified Channel Authentication Middleware (P1) ✅
 
 Each of the 7 channel adapters implements its own auth logic. No shared abstraction,
 no unified audit trail for auth failures.
@@ -1736,12 +1736,12 @@ no unified audit trail for auth failures.
   - `hardening` module with `harden_process()` called early in `main()`
   - No-op on non-Linux platforms; requires `libc` optional dependency
 
-#### 15.8: TEE Graceful Degradation with Explicit Security Level (P2)
+#### 15.8: TEE Graceful Degradation with Explicit Security Level (P2) ✅
 
 When TEE is unavailable, `ProcessInTee` silently degrades. Users don't know their
 security level dropped.
 
-- [ ] **`SecurityLevel` enum** exposed in API responses:
+- [x] **`SecurityLevel` enum** exposed in API responses:
   ```rust
   pub enum SecurityLevel {
       TeeHardware,    // SEV-SNP / TDX active, memory encrypted
@@ -1749,32 +1749,33 @@ security level dropped.
       ProcessOnly,    // No VM, no TEE — application security only
   }
   ```
-- [ ] **`GET /health`** includes `security_level` field
-- [ ] **`GET /api/v1/gateway/status`** includes `security_level` and `tee_available`
-- [ ] **Policy engine respects security level**:
+- [x] **`GET /health`** includes `security_level` field
+- [x] **`GET /status`** includes `security_level` and `tee_available`
+- [x] **Policy engine respects security level**:
   - If policy says `ProcessInTee` but `security_level == ProcessOnly`:
     - `HighlySensitive` / `Critical` PII → `Reject` (not silent downgrade)
     - `Sensitive` PII → `RequireConfirmation` with explicit warning
     - `Normal` PII → `ProcessLocal` (acceptable degradation)
   - Configurable: `tee.fallback_policy = "reject" | "warn" | "allow"` in config
-- [ ] **Startup warning**: Log `WARN` if TEE expected but not detected
+- [x] **Startup warning**: Log `WARN` if TEE expected but not detected
 
-#### 15.9: Architectural Prompt Injection Defense (P2)
+#### 15.9: Architectural Prompt Injection Defense (P2) ✅
 
 Heuristic detection is a losing game. Defense should be structural.
 
-- [ ] **Structured message format**: Separate user content from system instructions at the type level
+- [x] **Structured message format**: Separate user content from system instructions at the type level
   ```rust
   pub enum MessageSegment {
       System { content: String, immutable: bool },
-      User { content: String, taint: HashSet<TaintLabel> },
+      User { content: String, taint: HashSet<String> },
       Tool { content: String, tool_name: String },
+      Assistant { content: String, source_segments: Vec<usize> },
   }
   ```
-- [ ] **Segment-aware sanitization**: `InjectionDetector` only scans `User` segments
-- [ ] **Output attribution**: Model responses tagged with which input segments influenced them (best-effort, via prompt engineering)
-- [ ] **Canary token injection**: Insert unique tokens in system prompts, detect if they appear in model output (indicates prompt leakage)
-- [ ] **Keep heuristic detector**: As defense-in-depth layer, not primary defense
+- [x] **Segment-aware sanitization**: `InjectionDetector::scan_structured()` only scans `User` segments
+- [x] **Output attribution**: `Assistant` segment carries `source_segments` indices (best-effort)
+- [x] **Canary token injection**: `CanaryToken` generates unique tokens for system prompts, detects leakage in model output
+- [x] **Keep heuristic detector**: `scan()` preserved as defense-in-depth, `scan_structured()` is the preferred entry point
 
 #### 15.10: Memory System Upgrade — From Log to Actual Memory (P2)
 
@@ -1812,8 +1813,8 @@ P1 (close real attack vectors) ✅:
   15.7  Bounded State + Secure Erasure ✅
 
 P2 (defense in depth):
-  15.8  TEE Graceful Degradation
-  15.9  Structural Injection Defense
+  15.8  TEE Graceful Degradation          ✅
+  15.9  Structural Injection Defense        ✅
   15.10 Memory System Upgrade
 ```
 
@@ -1932,7 +1933,7 @@ cargo build
 
 ### Test
 
-**609 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration, agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, prompt injection defense, taint audit trail), audit event bus, real-time alerting, and process hardening.
+**656 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, and process hardening.
 
 ```bash
 cargo test

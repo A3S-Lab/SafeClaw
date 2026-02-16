@@ -24,6 +24,7 @@ use tokio::sync::RwLock;
 pub struct AuditState {
     pub log: Arc<RwLock<AuditLog>>,
     pub alert_monitor: Option<Arc<AlertMonitor>>,
+    pub persistence: Option<Arc<crate::leakage::AuditPersistence>>,
 }
 
 /// Create the audit router
@@ -33,6 +34,8 @@ pub fn audit_router(state: AuditState) -> Router {
         .route("/api/v1/audit/events/:id", get(get_event))
         .route("/api/v1/audit/stats", get(get_stats))
         .route("/api/v1/audit/alerts", get(get_alerts))
+        .route("/api/v1/audit/query", get(query_events))
+        .route("/api/v1/audit/export", get(export_events))
         .with_state(state)
 }
 
@@ -44,6 +47,17 @@ pub fn audit_router(state: AuditState) -> Router {
 struct ListEventsQuery {
     session: Option<String>,
     severity: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdvancedQuery {
+    session: Option<String>,
+    severity: Option<String>,
+    vector: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+    q: Option<String>,
     limit: Option<usize>,
 }
 
@@ -170,6 +184,105 @@ async fn get_alerts(
     }
 }
 
+// =============================================================================
+// Advanced query / export handlers
+// =============================================================================
+
+fn parse_severity(s: &str) -> Option<AuditSeverity> {
+    match s {
+        "info" => Some(AuditSeverity::Info),
+        "warning" => Some(AuditSeverity::Warning),
+        "high" => Some(AuditSeverity::High),
+        "critical" => Some(AuditSeverity::Critical),
+        _ => None,
+    }
+}
+
+fn parse_vector(s: &str) -> Option<crate::leakage::LeakageVector> {
+    use crate::leakage::LeakageVector;
+    match s {
+        "output_channel" => Some(LeakageVector::OutputChannel),
+        "tool_call" => Some(LeakageVector::ToolCall),
+        "dangerous_command" => Some(LeakageVector::DangerousCommand),
+        "network_exfil" => Some(LeakageVector::NetworkExfil),
+        "file_exfil" => Some(LeakageVector::FileExfil),
+        "auth_failure" => Some(LeakageVector::AuthFailure),
+        "policy_drift" => Some(LeakageVector::PolicyDrift),
+        _ => None,
+    }
+}
+
+/// GET /api/v1/audit/query — advanced query with time range, vector, text search
+async fn query_events(
+    State(state): State<AuditState>,
+    Query(params): Query<AdvancedQuery>,
+) -> impl IntoResponse {
+    let limit = params.limit.unwrap_or(100).min(1000);
+
+    let filter = crate::leakage::AuditQueryFilter {
+        session_id: params.session,
+        severity: params.severity.as_deref().and_then(parse_severity),
+        vector: params.vector.as_deref().and_then(parse_vector),
+        from_ms: params.from,
+        to_ms: params.to,
+        search: params.q,
+        limit: Some(limit),
+    };
+
+    // Try persisted events first, fall back to in-memory log
+    if let Some(ref persistence) = state.persistence {
+        let mut results = persistence.query(&filter).await;
+        results.truncate(limit);
+        Json(serde_json::json!({
+            "events": results,
+            "total": results.len(),
+            "source": "persisted",
+        }))
+    } else {
+        let log = state.log.read().await;
+        let all: Vec<&AuditEvent> = log.recent(log.len());
+        let filtered: Vec<AuditEvent> = all
+            .into_iter()
+            .filter(|e| filter.matches(e))
+            .take(limit)
+            .cloned()
+            .collect();
+        let count = filtered.len();
+        Json(serde_json::json!({
+            "events": filtered,
+            "total": count,
+            "source": "memory",
+        }))
+    }
+}
+
+/// GET /api/v1/audit/export — export all persisted events as JSON array
+async fn export_events(State(state): State<AuditState>) -> impl IntoResponse {
+    if let Some(ref persistence) = state.persistence {
+        let events = persistence.export_all().await;
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "events": events,
+                "total": events.len(),
+            })),
+        )
+    } else {
+        // Fall back to in-memory log
+        let log = state.log.read().await;
+        let events: Vec<AuditEvent> = log.recent(log.len()).into_iter().cloned().collect();
+        let count = events.len();
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "events": events,
+                "total": count,
+                "source": "memory",
+            })),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +296,7 @@ mod tests {
         let state = AuditState {
             log: log.clone(),
             alert_monitor: None,
+            persistence: None,
         };
         (audit_router(state), log)
     }
@@ -415,6 +529,7 @@ mod tests {
         let state = AuditState {
             log,
             alert_monitor: Some(monitor),
+            persistence: None,
         };
         let app = audit_router(state);
 

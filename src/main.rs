@@ -286,6 +286,7 @@ async fn run_gateway(
     let audit_state = AuditState {
         log: gateway.global_audit_log().clone(),
         alert_monitor: Some(gateway.alert_monitor().clone()),
+        persistence: None,
     };
 
     // Build remaining routers with CORS for cross-origin UI access
@@ -359,6 +360,7 @@ async fn run_serve(
     let audit_state = AuditState {
         log: gateway.global_audit_log().clone(),
         alert_monitor: Some(gateway.alert_monitor().clone()),
+        persistence: None,
     };
     let events_state = build_events_state().await?;
     let settings_state = build_settings_state(&config, &config.models);

@@ -40,6 +40,8 @@ pub enum LeakageVector {
     FileExfil,
     /// Channel authentication failure
     AuthFailure,
+    /// Security policy drift detected (runtime config differs from declared policy)
+    PolicyDrift,
 }
 
 /// A structured audit event for leakage prevention
@@ -339,6 +341,7 @@ mod tests {
             LeakageVector::NetworkExfil,
             LeakageVector::FileExfil,
             LeakageVector::AuthFailure,
+            LeakageVector::PolicyDrift,
         ] {
             let json = serde_json::to_string(&vector).unwrap();
             let parsed: LeakageVector = serde_json::from_str(&json).unwrap();

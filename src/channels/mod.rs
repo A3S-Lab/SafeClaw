@@ -5,11 +5,13 @@
 
 mod adapter;
 pub mod auth;
+pub mod confirmation;
 mod dingtalk;
 mod discord;
 mod feishu;
 mod message;
 mod slack;
+pub mod supervisor;
 mod telegram;
 mod webchat;
 mod wecom;
@@ -18,6 +20,9 @@ pub use adapter::{ChannelAdapter, ChannelEvent};
 pub use auth::{
     AuthLayer, AuthMiddleware, AuthOutcome, ChannelAuth, DingTalkAuth, DiscordAuth, FeishuAuth,
     SlackAuth, TelegramAuth, WeComAuth,
+};
+pub use confirmation::{
+    ConfirmationManager, ConfirmationResponse, ConfirmationResult, HitlConfig,
 };
 pub use dingtalk::DingTalkAdapter;
 pub use discord::DiscordAdapter;
