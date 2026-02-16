@@ -1479,7 +1479,7 @@ Production readiness:
   - [ ] Deployment guide (standalone + A3S OS)
   - [ ] API documentation
 
-### Phase 9: Runtime Security Audit Pipeline 🚧
+### Phase 9: Runtime Security Audit Pipeline ✅
 
 Continuous runtime verification and audit:
 
@@ -1493,14 +1493,17 @@ Continuous runtime verification and audit:
   - Session rate exceeded → alert (configurable: N events in M-second window)
   - `GET /api/v1/audit/alerts` REST endpoint
   - Configurable thresholds via `AuditConfig` (`audit.alert.*` in config)
-- [ ] **Audit Persistence**: Long-term storage for compliance
-  - PostgreSQL / ClickHouse backend for audit events
-  - Retention policies (30d / 90d / 1y configurable)
-  - Query API for security investigations
-- [ ] **Security Policy Drift Detection**: A3sfile vs runtime state
-  - Periodic reconciliation: declared security policy vs actual runtime config
-  - Detect manual modifications to security policies
-  - Alert on drift via audit event bus
+- [x] **Audit Persistence**: Long-term storage for compliance
+  - JSONL file-based persistence with automatic rotation (configurable max size)
+  - Retention policies (configurable `retention_days`, default 90d)
+  - Advanced query API (`AuditQueryFilter`: session, severity, vector, time range, text search)
+  - Export API for compliance investigations
+  - REST endpoints: `GET /api/v1/audit/query`, `GET /api/v1/audit/export`
+- [x] **Security Policy Drift Detection**: A3sfile vs runtime state
+  - `PolicySnapshot` captures security-relevant config (TEE, channels, firewall, privacy rules)
+  - `DriftDetector` with periodic reconciliation via `spawn_drift_checker`
+  - Detect changes to TEE settings, security level, channel config, firewall policy
+  - Alert on drift via audit event bus (`LeakageVector::PolicyDrift`)
 - [x] **Panic Path Elimination**: Systematic audit of unsafe code paths
   - [x] Audit all `unwrap()`, `expect()`, `panic!()`, `todo!()`, `unimplemented!()` in production code
   - [x] Replace with proper `Result`/`Option` error handling
