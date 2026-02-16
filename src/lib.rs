@@ -103,6 +103,7 @@ pub mod leakage;
 pub mod memory;
 pub mod personas;
 pub mod privacy;
+pub mod scheduler;
 pub mod session;
 pub mod settings;
 pub mod tee;
@@ -120,4 +121,5 @@ pub use leakage::{
 };
 pub use personas::{personas_router, PersonaStore, PersonasState};
 pub use privacy::{privacy_router, PrivacyState};
+pub use scheduler::{scheduler_router, SchedulerState, TaskScheduler};
 pub use settings::{settings_router, SettingsState};

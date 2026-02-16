@@ -16,6 +16,7 @@ use safeclaw::{
     gateway::GatewayBuilder,
     leakage::{audit_router, AuditState},
     personas::{personas_router, PersonaStore, PersonasState},
+    scheduler::{scheduler_router, SchedulerState, TaskScheduler},
     settings::{settings_router, SettingsState},
 };
 use std::collections::HashMap;
@@ -256,6 +257,30 @@ async fn build_agent_state(models: ModelsConfig) -> Result<AgentState> {
     Ok(AgentState { engine, models })
 }
 
+/// Build the proactive task scheduler.
+///
+/// Currently creates a scheduler with no channel adapters wired (channel
+/// delivery requires a running gateway with active adapters). Tasks still
+/// execute via the agent engine; results are logged. Channel delivery will
+/// be connected when the gateway exposes its adapter registry.
+async fn build_scheduler(
+    engine: std::sync::Arc<safeclaw::agent::AgentEngine>,
+    config: safeclaw::config::SchedulerConfig,
+) -> Result<TaskScheduler> {
+    let workspace = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join(".safeclaw-scheduler");
+    std::fs::create_dir_all(&workspace).context("Failed to create scheduler workspace")?;
+
+    // Channel adapters will be wired when gateway exposes its adapter map.
+    // For now, results are delivered via the cron event log.
+    let channels = HashMap::new();
+
+    TaskScheduler::new(engine, channels, config, &workspace.to_string_lossy())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to create TaskScheduler: {}", e))
+}
+
 async fn run_gateway(
     config: SafeClawConfig,
     host: String,
@@ -293,16 +318,36 @@ async fn run_gateway(
     let events_state = build_events_state().await?;
     let settings_state = build_settings_state(&settings_config, &models);
     let personas_state = build_personas_state().await?;
+
+    // Build scheduler if enabled
+    let scheduler_router_opt = if settings_config.scheduler.enabled {
+        let scheduler = build_scheduler(
+            agent_state.engine.clone(),
+            settings_config.scheduler.clone(),
+        )
+        .await?;
+        scheduler.start().await.context("Failed to start scheduler")?;
+        let sched_state = SchedulerState {
+            scheduler: std::sync::Arc::new(scheduler),
+        };
+        Some(scheduler_router(sched_state))
+    } else {
+        None
+    };
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-    let app = agent_router(agent_state)
+    let mut app = agent_router(agent_state)
         .merge(events_router(events_state))
         .merge(settings_router(settings_state))
         .merge(personas_router(personas_state))
-        .merge(audit_router(audit_state))
-        .layer(cors);
+        .merge(audit_router(audit_state));
+    if let Some(sched_router) = scheduler_router_opt {
+        app = app.merge(sched_router);
+    }
+    let app = app.layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -365,17 +410,37 @@ async fn run_serve(
     let events_state = build_events_state().await?;
     let settings_state = build_settings_state(&config, &config.models);
     let personas_state = build_personas_state().await?;
+
+    // Build scheduler if enabled
+    let scheduler_router_opt = if config.scheduler.enabled {
+        let scheduler = build_scheduler(
+            agent_state.engine.clone(),
+            config.scheduler.clone(),
+        )
+        .await?;
+        scheduler.start().await.context("Failed to start scheduler")?;
+        let sched_state = SchedulerState {
+            scheduler: std::sync::Arc::new(scheduler),
+        };
+        Some(scheduler_router(sched_state))
+    } else {
+        None
+    };
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
-    let app = safeclaw::gateway::ApiHandler::router(gateway.clone())
+    let mut app = safeclaw::gateway::ApiHandler::router(gateway.clone())
         .merge(agent_router(agent_state))
         .merge(events_router(events_state))
         .merge(settings_router(settings_state))
         .merge(personas_router(personas_state))
-        .merge(audit_router(audit_state))
-        .layer(cors);
+        .merge(audit_router(audit_state));
+    if let Some(sched_router) = scheduler_router_opt {
+        app = app.merge(sched_router);
+    }
+    let app = app.layer(cors);
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
         .parse()

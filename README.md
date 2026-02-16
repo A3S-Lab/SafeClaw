@@ -1541,18 +1541,18 @@ inside an A3S Box VM. A3S Code runs as a separate local service in the same VM.
 - [ ] **Keep `generate_response()` API**: Refactored to call local service instead of in-process
 - [ ] **Browser UI WebSocket proxy**: `/ws/agent/browser/:id` proxies to a3s-code service
 
-#### Phase 11.2: TEE self-detection (P0)
+#### Phase 11.2: TEE self-detection (P0) ✅
 
-- [ ] **`TeeRuntime`** (replaces `TeeOrchestrator`):
-  - Startup self-detection: check `/dev/sev-guest` or `a3s-box-core::TeeConfig`
+- [x] **`TeeRuntime`** (replaces `TeeOrchestrator`):
+  - Startup self-detection: check `/dev/sev-guest` + CPUID for AMD SEV-SNP
   - If SEV-SNP present → enable sealed storage, expose attestation endpoint
   - If not present → disabled mode, all application security still active
-  - `is_tee() -> bool` / `seal(data)` / `unseal(blob)` API
-- [ ] **Remove `a3s-box-runtime` dependency**: SafeClaw is guest, not host
-- [ ] **Remove `TeeOrchestrator`**: No VM boot, no `VmController`, no `InstanceSpec`
-- [ ] **Keep `a3s-box-core`**: TEE self-detection, sealed storage, RA-TLS
-- [ ] **Refactor `SessionManager`**: Remove orchestrator wiring, use `TeeRuntime`
-- [ ] **Feature flag cleanup**: `real-tee` flag for `a3s-box-core` sealed storage; `mock-tee` for testing
+  - `is_tee() -> bool` / `security_level()` / `seal(data)` / `unseal(blob)` API
+- [x] **`SealedStorage`**: AES-256-GCM with VCEK-derived keys (TEE) or file-based keys (dev)
+- [x] **Remove `a3s-box-runtime` dependency**: SafeClaw is guest, not host
+- [x] **Remove `TeeOrchestrator`**: No VM boot, no `VmController`, no `InstanceSpec`
+- [x] **Refactor `SessionManager`**: Remove orchestrator wiring, use `TeeRuntime`
+- [x] **Feature flag cleanup**: Removed `real-tee` and `mock-tee` flags, kept `hardening`
 
 ### Phase 12: HITL in Chat Channels ✅
 
@@ -1572,11 +1572,12 @@ and fall back to in-process defaults when services are not present.
 - [ ] **a3s-cron**: Scheduled autonomous task execution
 - [ ] **Session persistence**: Survive restarts via external store (Redis/SQLite)
 
-### Phase 14: Proactive Task Scheduler 📋
+### Phase 14: Proactive Task Scheduler ✅
 
-- [ ] **Task definitions**: Cron schedule + prompt + target channel
-- [ ] **Autonomous execution**: Agent runs without user prompt trigger
-- [ ] **Result delivery**: Push to configured channel (full/summary/diff)
+- [x] **Task definitions**: Cron schedule + prompt + target channel (`SchedulerConfig`, `ScheduledTaskDef`, `DeliveryMode`)
+- [x] **Autonomous execution**: Agent runs without user prompt trigger (`EngineExecutor` implements `AgentExecutor`, wraps `AgentEngine::generate_response`)
+- [x] **Result delivery**: Push to configured channel — full/summary/diff modes, error notifications, diff-skip deduplication
+- [x] **REST API**: CRUD endpoints at `/scheduler/tasks`, manual trigger, pause/resume, execution history
 
 ### Phase 15: First-Principles Security Hardening (P0+P1 ✅, P2 📋)
 
@@ -1936,7 +1937,7 @@ cargo build
 
 ### Test
 
-**656 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, and process hardening.
+**696 unit tests** covering privacy classification, semantic analysis, compliance rules, privacy/audit REST API, channels (auth middleware + rate limiting + supervised restart + HITL confirmation), crypto, memory (3-layer hierarchy + taint propagation + bounded stores), gateway, sessions, TEE integration (security levels, fallback policies), agent engine, event translation, leakage prevention (taint tracking, output sanitizer, tool call interceptor, audit log, structured message segments, canary token detection, prompt injection defense, taint audit trail, JSONL persistence), audit event bus, real-time alerting, process hardening, and proactive task scheduler.
 
 ```bash
 cargo test

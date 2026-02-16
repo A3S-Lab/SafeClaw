@@ -32,6 +32,10 @@ pub struct SafeClawConfig {
     /// Audit event pipeline configuration
     #[serde(default)]
     pub audit: AuditConfig,
+
+    /// Proactive task scheduler configuration
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 /// A3S Gateway integration configuration
@@ -649,6 +653,7 @@ impl ModelsConfig {
                             modalities: a3s_code::config::ModelModalities::default(),
                             cost: a3s_code::config::ModelCost::default(),
                             limit: a3s_code::config::ModelLimit::default(),
+                            scenario: None,
                         }
                     })
                     .collect();
@@ -728,6 +733,73 @@ impl Default for AuditConfig {
             persistence: crate::leakage::PersistenceConfig::default(),
         }
     }
+}
+
+/// Proactive task scheduler configuration
+///
+/// Defines scheduled tasks that run autonomously on a cron schedule.
+/// Each task executes an agent prompt and delivers results to a channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    /// Enable the proactive task scheduler
+    pub enabled: bool,
+
+    /// Scheduled task definitions
+    #[serde(default)]
+    pub tasks: Vec<ScheduledTaskDef>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tasks: Vec::new(),
+        }
+    }
+}
+
+/// A scheduled task definition from configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledTaskDef {
+    /// Human-readable task name
+    pub name: String,
+
+    /// Cron schedule expression (5 fields: min hour day month weekday)
+    pub schedule: String,
+
+    /// Agent prompt to execute
+    pub prompt: String,
+
+    /// Target channel for result delivery (e.g., "telegram", "slack", "webchat")
+    pub channel: String,
+
+    /// Target chat ID within the channel
+    pub chat_id: String,
+
+    /// Result delivery mode
+    #[serde(default)]
+    pub delivery: DeliveryMode,
+
+    /// Execution timeout in milliseconds (default: 120000 = 2 min)
+    #[serde(default = "default_task_timeout")]
+    pub timeout_ms: u64,
+}
+
+/// How the agent result is delivered to the target channel
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeliveryMode {
+    /// Send the full agent response
+    #[default]
+    Full,
+    /// Send a summary (first 500 chars)
+    Summary,
+    /// Send only if the result differs from the previous run
+    Diff,
+}
+
+fn default_task_timeout() -> u64 {
+    120_000
 }
 
 // Helper module for default directories
