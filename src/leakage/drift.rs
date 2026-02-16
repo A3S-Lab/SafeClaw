@@ -11,7 +11,7 @@
 //! - Channel config differs from declared config
 
 use crate::config::SafeClawConfig;
-use crate::leakage::{AuditEvent, AuditEventBus, AuditLog, AuditSeverity, LeakageVector};
+use crate::leakage::{AuditEvent, AuditEventBus, AuditSeverity, LeakageVector};
 use crate::tee::SecurityLevel;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -237,6 +237,7 @@ pub fn spawn_drift_checker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::leakage::AuditLog;
 
     fn default_snapshot() -> PolicySnapshot {
         PolicySnapshot {

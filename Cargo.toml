@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal A3S crates
 a3s-tools-core = { version = "0.1", path = "../tools-core" }
-a3s-lane = { version = "0.1", path = "../lane" }
+a3s-lane = { version = "0.2", path = "../lane" }
 a3s-cron = { version = "0.1", path = "../cron" }
 a3s-code = { version = "0.6", path = "../code/server" }
 a3s-gateway = { version = "0.1", path = "../gateway" }

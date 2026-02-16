@@ -8,7 +8,6 @@
 //! unauthorized data processing. See `docs/threat-model.md` §4.
 
 use crate::channels::message::OutboundMessage;
-use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
