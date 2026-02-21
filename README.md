@@ -240,7 +240,7 @@ Think of SafeClaw like a **bank vault** for your AI assistant:
 ## Features
 
 - **Security Proxy**: Runs inside A3S Box VM alongside a local A3S Code agent service. SafeClaw handles security; A3S Code handles LLM processing
-- **Multi-Channel Routing**: 7 platform adapters (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) with session routing via `user_id:channel_id:chat_id` composite keys
+- **Multi-Channel Routing**: 7 platform adapters (Telegram, Feishu, DingTalk, WeCom, Slack, Discord, WebChat) with session routing via `user_id:channel_id:chat_id` composite keys; WhatsApp, Teams, Google Chat, Signal planned (Phase 16)
 - **Privacy Classification**: Regex + semantic + compliance (HIPAA, PCI-DSS, GDPR) PII detection via shared `a3s-privacy` library
 - **Semantic Privacy Analysis**: Context-aware PII detection for natural language disclosure ("my password is X", "my SSN is X") with Chinese language support
 - **Taint Tracking**: Mark sensitive input data with unique IDs, generate encoded variants (base64, hex, URL-encoded, reversed, no-separator), detect in outputs. Full propagation through 3-layer memory hierarchy with taint audit trail
@@ -356,7 +356,7 @@ The **same binary** runs in both modes. SafeClaw does not care how it was launch
 | **Ingress** | SafeClaw listens directly | A3S Gateway routes traffic (app-agnostic) |
 | **Scaling** | Single instance | K8s HPA (A3S OS doesn't know it's SafeClaw) |
 | **Audit** | In-memory bus | Optionally → a3s-event (NATS) |
-| **Scheduling** | None | Optionally → a3s-cron |
+| **Scheduling** | None | System cron + CLI |
 
 > A3S OS is **application-agnostic**. It only provides two things: A3S Gateway
 > (traffic routing) and A3S Box (VM runtime management). It does not know or care
@@ -400,7 +400,7 @@ NOT depended on by SafeClaw:
   a3s-code          → separate process, called via local service
   a3s-box-runtime   → host-side VM launcher, SafeClaw is the guest
   a3s-gateway       → K8s Ingress, SafeClaw doesn't know about it
-  a3s-event/cron     → optional platform services, config-driven
+  a3s-event          → optional platform service, config-driven
 ```
 
 ### Message Flow
@@ -1143,16 +1143,25 @@ safeclaw/
 │   ├── lib.rs              # Library entry point
 │   ├── api.rs              # Unified API router (build_app, CORS, all endpoints)
 │   ├── main.rs             # CLI entry point
-│   ├── config.rs           # Configuration management (JSON, ModelsConfig → CodeConfig mapping)
+│   ├── config.rs           # Configuration management (HCL/JSON, ModelsConfig → CodeConfig mapping)
 │   ├── error.rs            # Error types
+│   ├── hardening.rs        # Process hardening (rlimits, seccomp)
 │   ├── agent/              # Agent module (direct a3s-code integration)
-│   │   ├── mod.rs          # Module re-exports
 │   │   ├── engine.rs       # AgentEngine — wraps SessionManager, event translation
 │   │   ├── handler.rs      # REST + WebSocket handlers (axum)
 │   │   ├── session_store.rs # UI state persistence (JSON files)
 │   │   └── types.rs        # Browser message types, session state
+│   ├── audit/              # Observability pipeline (audit log, alerting, persistence)
+│   │   ├── log.rs          # AuditLog — structured events with severity, vectors, session tracking
+│   │   ├── bus.rs          # AuditEventBus — broadcast events to subscribers
+│   │   ├── alerting.rs     # AlertMonitor — threshold-based alerting
+│   │   ├── persistence.rs  # JSONL append-only persistence with rotation
+│   │   └── handler.rs      # Audit REST API (events, stats, export)
 │   ├── channels/           # Multi-channel adapters
 │   │   ├── adapter.rs      # Channel adapter trait
+│   │   ├── auth.rs         # Channel authentication
+│   │   ├── confirmation.rs # HITL confirmation
+│   │   ├── supervisor.rs   # Auto-restart supervisor
 │   │   ├── message.rs      # Message types
 │   │   ├── telegram.rs     # Telegram adapter
 │   │   ├── feishu.rs       # Feishu (飞书) adapter
@@ -1161,39 +1170,43 @@ safeclaw/
 │   │   ├── slack.rs        # Slack adapter
 │   │   ├── discord.rs      # Discord adapter
 │   │   └── webchat.rs      # WebChat adapter
-│   ├── crypto/             # Cryptographic utilities
-│   │   ├── keys.rs         # Key management
-│   │   └── secure_channel.rs # Encrypted channels
-│   ├── gateway/            # Gateway integration (delegates to a3s-gateway)
-│   │   ├── server.rs       # Backend service registration
-│   │   ├── handler.rs      # Request handler (receives from a3s-gateway)
-│   │   ├── integration.rs  # Service discovery (ServiceDescriptor, /.well-known/a3s-service.json)
-│   │   └── websocket.rs    # WebSocket handler (proxied by a3s-gateway)
-│   ├── leakage/            # AI agent leakage prevention
-│   │   ├── mod.rs          # Module re-exports
+│   ├── guard/              # Core protection pipeline
 │   │   ├── taint.rs        # Taint registry — mark sensitive data, generate variants, detect matches
 │   │   ├── sanitizer.rs    # Output sanitizer — scan AI output for tainted data, auto-redact
 │   │   ├── interceptor.rs  # Tool call interceptor — block tainted args & dangerous commands
-│   │   ├── handler.rs      # Audit REST API (events, stats)
-│   │   └── audit.rs        # Audit log — structured events with severity, vectors, session tracking
-│   ├── privacy/            # Privacy classification
-│   │   ├── classifier.rs   # Sensitive data detection
-│   │   ├── compliance.rs   # Compliance rule engine (HIPAA, PCI-DSS, GDPR)
-│   │   ├── handler.rs      # Privacy REST API (classify, analyze, scan, compliance)
-│   │   ├── policy.rs       # Policy engine
-│   │   └── semantic.rs     # Semantic PII disclosure detection
+│   │   ├── injection.rs    # Prompt injection defense — pattern detection, base64 decoding
+│   │   ├── firewall.rs     # Network firewall — whitelist-only outbound connections
+│   │   ├── isolation.rs    # Session isolation — per-session taint/audit scoping, secure wipe
+│   │   ├── segments.rs     # Structured message segments
+│   │   └── traits.rs       # Guard trait abstractions
+│   ├── privacy/            # Privacy classification + unified pipeline
+│   │   ├── classifier.rs   # Wraps a3s-common RegexClassifier
+│   │   ├── backend.rs      # Pluggable classifier backends (Regex, Semantic, LLM)
+│   │   ├── pipeline.rs     # PrivacyPipeline — unified protection facade
+│   │   ├── policy.rs       # Policy engine — routing decisions
+│   │   ├── cumulative.rs   # Cumulative risk tracking (split-message attack defense)
+│   │   ├── semantic.rs     # Semantic PII disclosure detection
+│   │   └── handler.rs      # Privacy REST API (classify, analyze, scan)
+│   ├── runtime/            # Runtime orchestrator (lifecycle, channels, message loop)
+│   │   ├── orchestrator.rs # Runtime — start/stop, audit pipeline, channel adapters
+│   │   ├── api_handler.rs  # HTTP API handler (health, status, sessions)
+│   │   ├── processor.rs    # MessageProcessor — route → process → sanitize pipeline
+│   │   ├── integration.rs  # Service discovery (ServiceDescriptor, /.well-known/a3s-service.json)
+│   │   └── websocket.rs    # WebSocket handler
 │   ├── session/            # Session management
-│   │   ├── manager.rs      # Session lifecycle
-│   │   └── router.rs       # Privacy-based routing
+│   │   ├── manager.rs      # SessionManager — unified lifecycle, depends on PrivacyPipeline
+│   │   └── router.rs       # SessionRouter — privacy-based routing with cumulative risk
 │   └── tee/                # TEE integration
-│       ├── client.rs       # TEE client
-│       ├── manager.rs      # TEE session management
-│       └── protocol.rs     # Communication protocol
+│       ├── runtime.rs      # TeeRuntime — environment self-detection
+│       ├── sealed.rs       # Sealed storage (AES-GCM)
+│       ├── client.rs       # TEE client (Transport-based)
+│       ├── protocol.rs     # Communication protocol
+│       └── security_level.rs # TEE security level detection
 ```
 
 ## Known Architecture Issues
 
-> **Status**: The following issues were identified during a design review. They are tracked here for transparency and will be addressed in the Architecture Redesign phases below.
+> **Status**: All 5 issues identified during the design review have been resolved. Kept here for historical reference.
 
 ### 1. TEE Client Is Stub-Only
 
@@ -1201,19 +1214,11 @@ safeclaw/
 
 ### 2. Duplicated Privacy Classification (Security Defect)
 
-`SensitivityLevel`, `ClassificationRule`, and `default_classification_rules()` are independently defined in both SafeClaw and a3s-code with **incompatible regex patterns**:
-
-| Rule | SafeClaw pattern | a3s-code pattern |
-|------|-----------------|-----------------|
-| `credit_card` | `\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b` | `\b(?:\d[ -]*?){13,16}\b` |
-| `email` | `[A-Z\|a-z]{2,}` (literal pipe in char class) | `[A-Za-z]{2,}` (correct) |
-| `api_key` | `(sk-\|api[_-]?key\|token)` | `(?:sk\|pk\|api\|key\|token\|secret\|password)` |
-
-The same credit card number may match in one crate but not the other. SafeClaw's `SensitivityLevel` lacks `Ord` and uses fragile `as u8` casts; a3s-code's version properly derives `Ord`.
+~~`SensitivityLevel`, `ClassificationRule`, and `default_classification_rules()` are independently defined in both SafeClaw and a3s-code with **incompatible regex patterns**.~~ **Resolved in Phase 3.1**: Both SafeClaw and a3s-code now use `a3s-common::privacy::{SensitivityLevel, ClassificationRule, RegexClassifier, default_classification_rules}` as the single source of truth. SafeClaw's `config.rs` re-exports shared types; `classifier.rs` and `backend.rs` wrap `a3s_common::privacy::RegexClassifier`.
 
 ### 3. Two Parallel Session Systems
 
-`session::SessionManager` uses `user_id:channel_id:chat_id` keys; `tee::TeeManager` uses `user_id:channel_id` keys. `SessionRouter` tries to bridge them, but `Session` is behind `Arc` without interior mutability — `enable_tee(&mut self)` is structurally impossible to call. TEE upgrade mid-session cannot work.
+~~`session::SessionManager` uses `user_id:channel_id:chat_id` keys; `tee::TeeManager` uses `user_id:channel_id` keys. `SessionRouter` tries to bridge them, but `Session` is behind `Arc` without interior mutability — `enable_tee(&mut self)` is structurally impossible to call. TEE upgrade mid-session cannot work.~~ **Resolved in Phase 3.3 + Architecture Refactor**: Unified into a single `SessionManager` with `user:channel:chat` keys. `TeeManager` deleted. `Session` uses `Arc<RwLock<>>` interior mutability for all mutable fields. TEE upgrade via `mark_tee_active()` works on shared `Arc<Session>`.
 
 ### 4. Gateway Config Generation Direction Is Inverted
 
@@ -1380,62 +1385,51 @@ Central coordinator for TEE lifecycle — boots MicroVM, verifies attestation, i
 
 Prevent A3S Code from leaking sensitive data inside TEE. Uses shared `a3s-privacy` for consistent classification. All modules implemented: taint tracking, output sanitizer, tool call interceptor, audit log, network firewall, session isolation, prompt injection defense.
 
-- [x] **Output Sanitizer** (`leakage/sanitizer.rs`):
+- [x] **Output Sanitizer** (`guard/sanitizer.rs`):
   - [x] Scan AI output for tainted data before sending to user
   - [x] Detect encoded variants (base64, hex, URL encoding)
   - [x] Auto-redact sensitive data in output
   - [x] Generate audit logs for blocked leakage attempts
-- [x] **Taint Tracking System** (`leakage/taint.rs`):
+- [x] **Taint Tracking System** (`guard/taint.rs`):
   - [x] Mark sensitive data at input with unique taint IDs
   - [x] Track data transformations and variants (base64, hex, URL-encoded, reversed, lowercase, no-separator)
   - [x] Detect all variant matches in text with positions
   - [x] Redact matches with `[REDACTED:<type>]`, longest-first processing
-- [x] **Network Firewall** (`leakage/firewall.rs`):
+- [x] **Network Firewall** (`guard/firewall.rs`):
   - [x] Whitelist-only outbound connections (LLM APIs only by default)
   - [x] Block unauthorized domains, ports, and protocols
   - [x] Configurable `NetworkPolicy` with wildcard domain patterns
   - [x] Outbound traffic audit logging via `NetworkExfil` vector
-- [x] **Tool Call Interceptor** (`leakage/interceptor.rs`):
+- [x] **Tool Call Interceptor** (`guard/interceptor.rs`):
   - [x] Scan tool arguments for tainted data
   - [x] Block dangerous commands (curl, wget, nc, ssh, scp, rsync, etc.) with shell separator awareness
   - [x] Filesystem write restrictions (detect tainted data in write_file/edit/create_file)
   - [x] Audit log all blocked tool invocations with severity and leakage vector
-- [x] **Session Isolation** (`leakage/isolation.rs`):
+- [x] **Session Isolation** (`guard/isolation.rs`):
   - [x] Per-session `TaintRegistry` and `AuditLog` scoping via `SessionIsolation`
   - [x] No cross-session data access (guard-based access control)
   - [x] Secure memory wipe on session termination (overwrite + verify)
   - [x] Wipe verification (`WipeResult.verified`)
   - [x] Wired into `SessionManager`: auto-init on create, auto-wipe on terminate/shutdown
-- [x] **Prompt Injection Defense** (`leakage/injection.rs`):
+- [x] **Prompt Injection Defense** (`guard/injection.rs`):
   - [x] Detect common injection patterns (role override, data extraction, delimiter injection, safety bypass)
   - [x] Base64-encoded injection payload detection
   - [x] Configurable custom blocking/suspicious patterns
-  - [x] Wired into `SessionManager::process_in_tee()` — blocks before forwarding to TEE
+  - [x] Wired into `SessionManager::process_in_tee()` via `PrivacyPipeline` — blocks before forwarding to TEE
   - [x] Audit events: Critical for blocked, Warning for suspicious
-- [x] **Leakage Audit Log** (`leakage/audit.rs`):
+- [x] **Audit Log** (`audit/log.rs`):
   - [x] Structured `AuditEvent` with id, session, severity, vector, description, taint_labels, timestamp
   - [x] Bounded in-memory `AuditLog` with capacity eviction
   - [x] Query by session ID and severity level
   - [x] Severity levels: Info, Warning, High, Critical
   - [x] Leakage vectors: OutputChannel, ToolCall, DangerousCommand, NetworkExfil, FileExfil, AuthFailure
+- [x] **PrivacyPipeline** (`privacy/pipeline.rs`):
+  - [x] Unified protection facade: sanitize_output, intercept_tool_call, check_firewall, check_injection
+  - [x] `SessionManager` depends on single `PrivacyPipeline` instead of 8 concrete guard/audit types
 
-### Phase 6: Local LLM in TEE 📋
+### Phase 6: Local LLM Support ✅ (via a3s-power)
 
-Local model inference inside TEE for fully offline, air-gapped privacy.
-
-> **Note**: The distributed worker architecture (coordinator/worker/validator pattern,
-> multi-pod scaling) is handled by A3S OS — not SafeClaw. SafeClaw is a single binary.
-> A3S OS can run multiple SafeClaw instances behind A3S Gateway for horizontal scaling.
-
-- [ ] **Local LLM Integration** (via a3s-power):
-  - [ ] A3S Box support for local LLM (Qwen3, DeepSeek-R1, ChatGLM, Yi)
-  - [ ] Quantization support (Q4, Q8) for memory efficiency
-  - [ ] TEE-optimized inference runtime
-  - [ ] Model integrity verification (hash check before loading)
-- [ ] **Offline Mode**:
-  - [ ] No outbound network connections required
-  - [ ] All classification + sanitization runs locally
-  - [ ] Network firewall blocks all egress by default
+Local LLM inference is handled by **a3s-power**, not SafeClaw. SafeClaw calls a3s-code via gRPC/unix socket; a3s-code handles model selection including local backends. When a3s-power is configured as a backend, SafeClaw automatically benefits from offline inference with no code changes required.
 
 ### Phase 7: Advanced Privacy 🚧
 
@@ -1449,28 +1443,26 @@ Enhanced privacy classification and protection:
   - [x] Value extraction with sentence boundary detection
   - [x] Overlap deduplication (highest confidence wins)
   - [x] Automatic redaction of detected values
-- [x] **Compliance Rule Engine** (`privacy/compliance.rs`):
-  - [x] Pre-built HIPAA rules: MRN, health plan ID, ICD-10 codes, DEA numbers, NPI, prescriptions
-  - [x] Pre-built PCI-DSS rules: Visa/Mastercard/Amex PANs, CVV, expiry dates, magnetic stripe track data
-  - [x] Pre-built GDPR rules: National IDs, passports, IBAN, VAT numbers, IP addresses, Article 9 special categories (ethnic, religious, biometric)
-  - [x] Custom user-defined rule support via `ComplianceEngine::add_custom_rules()`
-  - [x] Per-framework TEE mandatory flag and minimum sensitivity level
-- [ ] **Differential Privacy** (research):
-  - [ ] Noise injection for statistical queries
-  - [ ] Model memorization protection
-  - [ ] Privacy budget tracking (ε-accounting)
+- ~~**Compliance Rule Engine** (`privacy/compliance.rs`)~~ — **Removed in Architecture Refactor**: Over-engineered for a personal AI assistant. HIPAA/PCI-DSS/GDPR enterprise compliance is out of scope for v0.1. Can be re-added as an extension if needed.
 
 ### Phase 8: Production Hardening 📋
 
 Production readiness:
 
+- [ ] **Streaming Responses** (P1 — production usability):
+  - [ ] Expose streaming `generate` on a3s-code client (return `event_rx` directly)
+  - [ ] Webhook handler: return 200 immediately, spawn background task for generation
+  - [ ] Feishu: `send_message` first, then `edit_message` (PATCH) on each `TextDelta` batch
+  - [ ] Throttle updates (every 500ms or 50 chars) to avoid rate limits
+  - [ ] Adapt for Slack, Discord, DingTalk, WeCom (`edit_message` already in `ChannelAdapter`)
+- [ ] **Credential Health Checks**:
+  - [ ] Periodic LLM API key validation (test call on startup + configurable interval)
+  - [ ] Channel token expiry detection — emit `AuditEvent` with `LeakageVector::AuthFailure` and alert operator before silent failure
+  - [ ] `GET /health` includes `credentials` field: `{"anthropic":"ok","telegram":"expired",...}`
 - [ ] **Security Audit**:
   - [ ] Third-party security review
   - [ ] Penetration testing
   - [ ] Cryptographic implementation audit
-- [ ] **Performance Optimization**:
-  - [ ] TEE sealed storage latency optimization
-  - [ ] Agent engine response streaming to channels
 - [ ] **Packaging**:
   - [ ] A3S Box VM image (OCI) for standalone deployment
   - [ ] Container image for A3S OS deployment
@@ -1530,7 +1522,12 @@ Correct two architectural errors: (1) host/guest role inversion from Phase 4,
 (2) in-process a3s-code embedding from Phase 3.25. SafeClaw is a **security proxy**
 inside an A3S Box VM. A3S Code runs as a separate local service in the same VM.
 
-#### Phase 11.1: Replace in-process AgentEngine with local service client (P0)
+#### Phase 11.1: Replace in-process AgentEngine with local service client (P0 — must fix before Phase 16+)
+
+> **This is the most critical pending item.** SafeClaw currently embeds a3s-code as a
+> Cargo dependency and runs the agent in-process. This blurs the security boundary:
+> SafeClaw is a proxy, not a runtime. All new channel and workflow features (Phase 16+)
+> depend on this being fixed first.
 
 - [ ] **A3S Code local service client**: gRPC/unix socket client to a3s-code
   - Replace `AgentEngine` (in-process) with service call to local a3s-code process
@@ -1569,12 +1566,11 @@ Connect to A3S OS platform services when available. All integrations are config-
 and fall back to in-process defaults when services are not present.
 
 - [x] **a3s-event**: Audit events → NATS via `spawn_event_bridge()` on `AuditEventBus` (`EventBridgeConfig`, NATS provider with in-memory fallback)
-- [x] **a3s-cron**: Scheduled autonomous task execution (implemented in Phase 14)
 - [x] **Session persistence**: File-based with debounced writes (`AgentSessionStore`), survives restarts
 
 ### Phase 14: Proactive Task Scheduler ✅
 
-- [x] **Task definitions**: Cron schedule + prompt + target channel (`SchedulerConfig`, `ScheduledTaskDef`, `DeliveryMode`)
+- [x] **Task definitions**: Schedule + prompt + target channel (`SchedulerConfig`, `ScheduledTaskDef`, `DeliveryMode`)
 - [x] **Autonomous execution**: Agent runs without user prompt trigger (`EngineExecutor` implements `AgentExecutor`, wraps `AgentEngine::generate_response`)
 - [x] **Result delivery**: Push to configured channel — full/summary/diff modes, error notifications, diff-skip deduplication
 - [x] **REST API**: CRUD endpoints at `/scheduler/tasks`, manual trigger, pause/resume, execution history
@@ -1782,27 +1778,6 @@ Heuristic detection is a losing game. Defense should be structural.
 - [x] **Canary token injection**: `CanaryToken` generates unique tokens for system prompts, detects leakage in model output
 - [x] **Keep heuristic detector**: `scan()` preserved as defense-in-depth, `scan_structured()` is the preferred entry point
 
-#### 15.10: Memory System Upgrade — From Log to Actual Memory (P2)
-
-Current L1→L2→L3 pipeline is a statistical aggregator, not a memory system.
-
-- [ ] **LLM-assisted extraction** (behind feature flag `llm-memory`):
-  - After rule-based extraction, optionally call LLM: "What long-term facts should be remembered from this conversation?"
-  - Structured output → new Artifacts with `source: "llm-extraction"`
-  - Privacy gate applies to extracted facts before storage
-- [ ] **Relevance scoring upgrade**:
-  - Replace hardcoded `importance * 0.7 + recency * 0.3` with per-user learned weights
-  - Track which recalled memories were actually useful (user feedback signal)
-  - Fallback to current formula when no feedback data
-- [ ] **Cross-session memory retrieval**:
-  - When new session starts, query L2/L3 for relevant context from past sessions
-  - Relevance = embedding similarity (requires embedding model, optional) or keyword match (default)
-  - Privacy gate re-evaluates before injecting historical context
-- [ ] **Memory decay and forgetting**:
-  - Artifacts not accessed in N days (configurable) auto-archive
-  - User can explicitly "forget" specific memories via API
-  - `DELETE /api/v1/memory/artifacts/:id` with secure erasure (zeroize)
-
 ### Phase 15 Execution Priority
 
 ```
@@ -1817,13 +1792,116 @@ P1 (close real attack vectors) ✅:
   15.6  Channel Auth Middleware ✅
   15.7  Bounded State + Secure Erasure ✅
 
-P2 (defense in depth):
-  15.8  TEE Graceful Degradation          ✅
-  15.9  Structural Injection Defense        ✅
-  15.10 Memory System Upgrade
+P2 (defense in depth) ✅:
+  15.8  TEE Graceful Degradation ✅
+  15.9  Structural Injection Defense ✅
 ```
 
-## API Reference
+### Phase 16: Missing Channels 📋
+
+OpenClaw supports 13+ channels. SafeClaw currently covers 7. The gap matters most for
+enterprise users (Teams) and the largest personal messaging platform (WhatsApp).
+
+- [ ] **WhatsApp** (P1 — largest global IM, highest personal PII density):
+  - [ ] WhatsApp Business API adapter (Meta Cloud API)
+  - [ ] HMAC-SHA256 webhook signature verification
+  - [ ] Media message handling (images, documents) with taint tracking
+- [ ] **Microsoft Teams** (P1 — enterprise, compliance-sensitive):
+  - [ ] Bot Framework adapter (Azure Bot Service)
+  - [ ] OAuth2 token verification
+  - [ ] Adaptive Card support for HITL confirmation prompts
+- [ ] **Google Chat** (P2):
+  - [ ] Google Chat app adapter
+  - [ ] JWT signature verification
+- [ ] **Signal** (P2 — privacy-aligned user base):
+  - [ ] Signal CLI / signal-cli bridge (no official bot API)
+  - [ ] Note: limited automation capability by design
+
+### Phase 17: Per-Channel Agent Configuration 📋
+
+Currently all channels share one agent config. This is both a usability gap and a
+security gap — personal Telegram and enterprise Slack should have different permission
+policies, privacy rules, and model choices.
+
+- [ ] **`ChannelAgentConfig`**: Per-channel override for agent settings
+  ```rust
+  pub struct ChannelAgentConfig {
+      pub model: Option<String>,           // override default model
+      pub permission_mode: Option<String>, // default | strict | trust
+      pub privacy_rules: Option<Vec<String>>, // extra rule sets for this channel
+      pub taint_policy: Option<TaintPolicy>,  // channel-specific taint handling
+      pub sandbox: Option<SandboxConfig>,     // tool restrictions per channel
+  }
+  pub struct SandboxConfig {
+      pub allowed_tools: Option<Vec<String>>, // whitelist; None = all tools allowed
+      pub blocked_tools: Vec<String>,         // always-blocked tools for this channel
+      pub max_file_write_bytes: Option<u64>,  // cap filesystem writes
+      pub network_policy: Option<NetworkPolicy>, // per-channel firewall override
+  }
+  ```
+  > Example: personal Telegram → `allowed_tools: None` (full access); enterprise Slack → `allowed_tools: ["read_file","web_search","web_fetch"]`
+- [ ] **Config mapping**: `channels.<name>.agent` block in HCL config
+- [ ] **Session routing**: `SessionManager` applies channel config when creating session
+- [ ] **Audit**: Channel config included in `PolicySnapshot` for drift detection
+
+### Phase 18: Workflow Orchestration 📋
+
+SafeClaw has a task scheduler (Phase 14) but no multi-step workflow composition.
+OpenClaw's "Lobster" pattern lets skills chain: `fetch_email → summarize → post_to_slack`.
+SafeClaw needs the same, with privacy checks at every step boundary.
+
+- [ ] **`WorkflowDef`**: Sequence of steps, each with a prompt + target tool/skill
+  ```rust
+  pub struct WorkflowDef {
+      pub id: String,
+      pub steps: Vec<WorkflowStep>,
+      pub trigger: WorkflowTrigger, // Manual | Schedule | WebhookEvent
+  }
+  pub struct WorkflowStep {
+      pub name: String,
+      pub prompt: String,
+      pub output_var: String,       // bind step output for next step
+      pub privacy_check: bool,      // run PrivacyPipeline on output before passing forward
+  }
+  ```
+- [ ] **Privacy gate at step boundaries**: Each step output passes through `PrivacyPipeline` before being injected into the next step's prompt — taint labels propagate through the chain
+- [ ] **`WorkflowExecutor`**: Runs steps sequentially, handles errors, delivers final output to channel
+- [ ] **REST API**: CRUD at `/api/v1/workflows`, manual trigger, execution history
+- [ ] **HITL integration**: Steps can require confirmation before proceeding
+
+### Phase 19: Cross-Session Memory Retrieval 📋
+
+The 3-layer memory system (Resource/Artifact/Insight) accumulates knowledge within a
+session but doesn't surface it in future sessions. OpenClaw's persistent memory injects
+relevant past context automatically. SafeClaw needs the same — with privacy gate
+re-evaluation before any historical context is injected.
+
+- [ ] **Cross-session retrieval on session start**: Query L2/L3 for relevant Artifacts/Insights from past sessions
+  - Default: keyword match against session topic and first user message
+  - Optional: embedding similarity (requires embedding model configured in a3s-code)
+  - Configurable: `memory.cross_session_retrieval = true` in HCL config (default: false)
+- [ ] **Privacy re-evaluation before injection**: Retrieved context passes through `PrivacyGate` again — taint labels from original session are preserved and re-checked against current session's security level
+- [ ] **Memory decay**: Artifacts not accessed in `memory.decay_days` (default: 90) auto-archive; archived artifacts excluded from retrieval but not deleted
+- [ ] **Explicit forget API**: `DELETE /api/v1/memory/artifacts/:id` and `DELETE /api/v1/memory/insights/:id` with secure erasure (`zeroize`)
+
+### Phase 20: Multi-User Support 📋
+
+SafeClaw's session key is already `user:channel:chat`, so multiple users are technically
+handled. But there is no user management layer — no registration, no per-user config,
+no admin/user role separation. This is required for enterprise channels (Teams, Slack)
+where multiple people share one SafeClaw instance.
+
+- [ ] **User registry**: `UserStore` with user ID, display name, role (`admin` | `user`), per-user config overrides
+- [ ] **Per-user privacy config**: Override global privacy rules, cumulative risk thresholds, and memory settings per user
+- [ ] **Role-based access**: Admin users can access audit logs, settings, and user management; regular users cannot
+- [ ] **User management API**:
+  - `GET /api/v1/users` — list users (admin only)
+  - `POST /api/v1/users` — register user
+  - `DELETE /api/v1/users/:id` — remove user and wipe their session data (zeroize)
+  - `PATCH /api/v1/users/:id` — update role or config
+- [ ] **Session isolation enforcement**: Verify `user_id` in session key matches authenticated caller; reject cross-user session access at middleware level
+
+
 
 SafeClaw exposes **33 REST endpoints + 1 WebSocket** organized into 8 modules. All responses use JSON. Error responses follow `{"error": {"code": "...", "message": "..."}}` format. CORS is enabled for all origins by default.
 
@@ -1925,8 +2003,7 @@ A3S Box VM
 | [A3S Gateway](https://github.com/A3S-Lab/Gateway) | K8s Ingress Controller | Routes traffic to SafeClaw; app-agnostic |
 | [A3S Lane](https://github.com/A3S-Lab/Lane) | Per-session priority queue | Inside a3s-code, not SafeClaw's concern |
 | [A3S Event](https://github.com/A3S-Lab/Event) | Event bus (NATS/Redis) | Optional: audit event forwarding (Phase 13) |
-| [A3S Cron](https://github.com/A3S-Lab/Cron) | Job scheduler | Optional: scheduled tasks (Phase 14) |
-| [A3S Power](https://github.com/A3S-Lab/Power) | Local LLM inference | Optional: offline TEE inference (Phase 6) |
+| [A3S Power](https://github.com/A3S-Lab/Power) | Local LLM inference | Optional: local model backend via a3s-code (no SafeClaw changes needed) |
 
 ## Development
 
@@ -1950,6 +2027,10 @@ cargo test
 cargo fmt
 cargo clippy
 ```
+
+## Community
+
+Join us on [Discord](https://discord.gg/XVg6Hu6H) for questions, discussions, and updates.
 
 ## License
 
