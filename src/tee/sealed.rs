@@ -72,11 +72,11 @@ impl SealedStorage {
     pub async fn seal(&self, name: &str, plaintext: &[u8]) -> Result<()> {
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = self
             .cipher
-            .encrypt(nonce, plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|e| Error::Tee(format!("Seal encryption failed: {e}")))?;
 
         // Store as: [nonce (12 bytes)][ciphertext]
@@ -86,7 +86,10 @@ impl SealedStorage {
 
         let path = self.storage_dir.join(Self::safe_filename(name));
         tokio::fs::write(&path, &sealed).await.map_err(|e| {
-            Error::Tee(format!("Failed to write sealed data to {}: {e}", path.display()))
+            Error::Tee(format!(
+                "Failed to write sealed data to {}: {e}",
+                path.display()
+            ))
         })?;
 
         Ok(())
@@ -107,27 +110,28 @@ impl SealedStorage {
         }
 
         let (nonce_bytes, ciphertext) = sealed.split_at(12);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_arr: [u8; 12] = nonce_bytes
+            .try_into()
+            .map_err(|_| Error::Tee("Invalid nonce length in sealed data".to_string()))?;
+        let nonce = Nonce::from(nonce_arr);
 
         self.cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|e| Error::Tee(format!("Unseal decryption failed: {e}")))
     }
 
     /// Check if sealed data exists.
     pub fn exists(&self, name: &str) -> bool {
-        self.storage_dir
-            .join(Self::safe_filename(name))
-            .exists()
+        self.storage_dir.join(Self::safe_filename(name)).exists()
     }
 
     /// Delete sealed data.
     pub async fn delete(&self, name: &str) -> Result<()> {
         let path = self.storage_dir.join(Self::safe_filename(name));
         if path.exists() {
-            tokio::fs::remove_file(&path).await.map_err(|e| {
-                Error::Tee(format!("Failed to delete sealed data: {e}"))
-            })?;
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| Error::Tee(format!("Failed to delete sealed data: {e}")))?;
         }
         Ok(())
     }
@@ -194,7 +198,7 @@ impl SealedStorage {
         }
 
         let mut req = SnpDerivedKeyReq {
-            root_key_select: 0, // VCEK
+            root_key_select: 0,      // VCEK
             guest_field_select: 0x1, // Bind to measurement
             vmpl: 0,
             guest_svn: 0,
@@ -237,9 +241,9 @@ impl SealedStorage {
         let key_path = Self::default_key_path()?;
 
         if key_path.exists() {
-            let data = tokio::fs::read(&key_path).await.map_err(|e| {
-                Error::Tee(format!("Failed to read key file: {e}"))
-            })?;
+            let data = tokio::fs::read(&key_path)
+                .await
+                .map_err(|e| Error::Tee(format!("Failed to read key file: {e}")))?;
             if data.len() != 32 {
                 return Err(Error::Tee(format!(
                     "Invalid key file size: expected 32, got {}",
@@ -258,9 +262,9 @@ impl SealedStorage {
             if let Some(parent) = key_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            tokio::fs::write(&key_path, &key).await.map_err(|e| {
-                Error::Tee(format!("Failed to write key file: {e}"))
-            })?;
+            tokio::fs::write(&key_path, &key)
+                .await
+                .map_err(|e| Error::Tee(format!("Failed to write key file: {e}")))?;
 
             // Restrict permissions (owner-only)
             #[cfg(unix)]
@@ -292,7 +296,13 @@ impl SealedStorage {
     /// Sanitize a name for use as a filename.
     fn safe_filename(name: &str) -> String {
         name.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             + ".sealed"
     }
@@ -374,10 +384,7 @@ mod tests {
             SealedStorage::safe_filename("user/secret"),
             "user_secret.sealed"
         );
-        assert_eq!(
-            SealedStorage::safe_filename("a.b.c"),
-            "a_b_c.sealed"
-        );
+        assert_eq!(SealedStorage::safe_filename("a.b.c"), "a_b_c.sealed");
     }
 
     #[tokio::test]

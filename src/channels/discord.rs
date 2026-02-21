@@ -30,14 +30,9 @@ impl DiscordAdapter {
         }
     }
 
-    /// Resolve bot token from environment variable
+    /// Resolve bot token from env var or inline value
     fn resolve_token(token_ref: &str) -> Result<String> {
-        std::env::var(token_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve Discord bot token from env var: {}",
-                token_ref
-            ))
-        })
+        super::resolve_credential(token_ref)
     }
 
     /// Check if a guild is allowed
@@ -47,12 +42,8 @@ impl DiscordAdapter {
 
     /// Parse Discord message into InboundMessage
     pub fn parse_message(msg: &DiscordMessage) -> Result<InboundMessage> {
-        let mut inbound = InboundMessage::new(
-            "discord",
-            &msg.author.id,
-            &msg.channel_id,
-            &msg.content,
-        );
+        let mut inbound =
+            InboundMessage::new("discord", &msg.author.id, &msg.channel_id, &msg.content);
         inbound.channel_message_id = msg.id.clone();
         inbound.sender_name = Some(msg.author.username.clone());
         inbound.timestamp = Self::parse_discord_timestamp(&msg.timestamp)?;
@@ -79,7 +70,7 @@ impl ChannelAdapter for DiscordAdapter {
         self.base.set_status(AdapterStatus::Starting);
 
         // Resolve token lazily
-        let token = Self::resolve_token(&self.config.bot_token_ref)?;
+        let token = Self::resolve_token(&self.config.bot_token)?;
         *self.bot_token.write().await = Some(token);
 
         *self.event_tx.write().await = Some(event_tx.clone());
@@ -119,7 +110,11 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
             .clone();
 
@@ -169,7 +164,11 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
             .clone();
 
@@ -201,7 +200,11 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
             .clone();
 
@@ -247,7 +250,11 @@ impl ChannelAdapter for DiscordAdapter {
             return Err(Error::Channel("Discord adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Discord bot token not initialized".to_string()))?
             .clone();
 
@@ -313,7 +320,7 @@ mod tests {
 
     fn create_test_config() -> DiscordConfig {
         DiscordConfig {
-            bot_token_ref: "TEST_DISCORD_BOT_TOKEN".to_string(),
+            bot_token: "TEST_DISCORD_BOT_TOKEN".to_string(),
             allowed_guilds: vec![123456789012345678],
             dm_policy: "pairing".to_string(),
         }
@@ -330,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_resolve_token_missing() {
-        let result = DiscordAdapter::resolve_token("NONEXISTENT_DISCORD_TOKEN");
+        let result = DiscordAdapter::resolve_token("");
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("Failed to resolve"));

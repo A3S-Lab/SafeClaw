@@ -74,6 +74,7 @@ pub struct ConfirmationResult {
 
 /// Configuration for HITL confirmation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HitlConfig {
     /// Whether HITL is enabled.
     pub enabled: bool,
@@ -384,10 +385,7 @@ mod tests {
             .insert("telegram".to_string(), ChannelPermissionPolicy::Strict);
 
         let mgr = ConfirmationManager::new(config);
-        assert_eq!(
-            mgr.channel_policy("slack"),
-            ChannelPermissionPolicy::Trust
-        );
+        assert_eq!(mgr.channel_policy("slack"), ChannelPermissionPolicy::Trust);
         assert_eq!(
             mgr.channel_policy("telegram"),
             ChannelPermissionPolicy::Strict

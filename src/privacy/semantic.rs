@@ -305,7 +305,11 @@ impl SemanticAnalyzer {
                     "authorization:",
                 ],
                 category: SemanticCategory::ApiKey,
-                validator: |v| v.len() >= 16 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_./+=".contains(c)),
+                validator: |v| {
+                    v.len() >= 16
+                        && v.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_./+=".contains(c))
+                },
                 confidence: 0.90,
             },
             // Bank account disclosure
@@ -422,7 +426,12 @@ fn redact_value(value: &str) -> String {
     let chars: Vec<char> = value.chars().collect();
     let first = chars[0];
     let last = chars[chars.len() - 1];
-    format!("{}{}{}",first, "*".repeat(chars.len().saturating_sub(2).min(20)), last)
+    format!(
+        "{}{}{}",
+        first,
+        "*".repeat(chars.len().saturating_sub(2).min(20)),
+        last
+    )
 }
 
 #[cfg(test)]
@@ -512,7 +521,8 @@ mod tests {
     #[test]
     fn test_detect_bearer_token() {
         let a = analyzer();
-        let result = a.analyze("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0");
+        let result =
+            a.analyze("authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0");
         assert!(!result.matches.is_empty());
         assert_eq!(result.matches[0].category, SemanticCategory::ApiKey);
     }

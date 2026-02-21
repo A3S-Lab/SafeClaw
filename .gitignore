@@ -16,3 +16,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Local config (contains secrets)
+safeclaw.local.hcl

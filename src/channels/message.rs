@@ -96,6 +96,10 @@ pub struct OutboundMessage {
     pub format: MessageFormat,
     /// Whether to send typing indicator first
     pub show_typing: bool,
+    /// Optional custom card payload (channel-specific JSON).
+    /// When set, the adapter sends this card instead of wrapping `content` in a default card.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<serde_json::Value>,
 }
 
 impl OutboundMessage {
@@ -109,6 +113,7 @@ impl OutboundMessage {
             reply_to: None,
             format: MessageFormat::Markdown,
             show_typing: true,
+            card: None,
         }
     }
 
@@ -133,6 +138,12 @@ impl OutboundMessage {
     /// Disable typing indicator
     pub fn no_typing(mut self) -> Self {
         self.show_typing = false;
+        self
+    }
+
+    /// Set a custom card payload (channel-specific JSON)
+    pub fn with_card(mut self, card: serde_json::Value) -> Self {
+        self.card = Some(card);
         self
     }
 }

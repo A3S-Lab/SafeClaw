@@ -184,10 +184,7 @@ impl TeeRuntime {
     /// to prove this code is running inside a genuine SEV-SNP VM.
     ///
     /// Returns raw attestation report bytes.
-    pub async fn generate_attestation_report(
-        &self,
-        user_data: &[u8; 64],
-    ) -> Result<Vec<u8>> {
+    pub async fn generate_attestation_report(&self, user_data: &[u8; 64]) -> Result<Vec<u8>> {
         if !self.attestation_available {
             return Err(Error::Tee(
                 "Attestation not available: no SEV-SNP hardware detected".to_string(),
@@ -347,13 +344,8 @@ impl TeeRuntime {
             fw_err: 0,
         };
 
-        let ret = unsafe {
-            libc::ioctl(
-                file.as_raw_fd(),
-                SNP_GET_REPORT,
-                &mut guest_req as *mut _,
-            )
-        };
+        let ret =
+            unsafe { libc::ioctl(file.as_raw_fd(), SNP_GET_REPORT, &mut guest_req as *mut _) };
 
         if ret != 0 {
             return Err(Error::Tee(format!(

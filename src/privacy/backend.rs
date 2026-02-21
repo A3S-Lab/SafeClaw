@@ -19,8 +19,8 @@
 //! Every `PiiMatch` includes a `backend` field identifying which classifier
 //! caught it. This enables audit trails and accuracy analysis.
 
-use async_trait::async_trait;
 use crate::config::SensitivityLevel;
+use async_trait::async_trait;
 
 /// A single PII match found by a classifier backend.
 #[derive(Debug, Clone)]
@@ -61,10 +61,10 @@ pub trait ClassifierBackend: Send + Sync {
 
 /// Regex-based classifier backend.
 ///
-/// Wraps the existing `a3s_privacy::RegexClassifier`. Fast, high-precision,
+/// Wraps the existing `a3s_common::privacy::RegexClassifier`. Fast, high-precision,
 /// but low recall for semantic PII (addresses in prose, passwords in context).
 pub struct RegexBackend {
-    inner: a3s_privacy::RegexClassifier,
+    inner: a3s_common::privacy::RegexClassifier,
 }
 
 impl RegexBackend {
@@ -73,7 +73,7 @@ impl RegexBackend {
         rules: Vec<crate::config::ClassificationRule>,
         default_level: SensitivityLevel,
     ) -> Result<Self, String> {
-        let inner = a3s_privacy::RegexClassifier::new(&rules, default_level)
+        let inner = a3s_common::privacy::RegexClassifier::new(&rules, default_level)
             .map_err(|e| format!("Failed to compile classification rules: {}", e))?;
         Ok(Self { inner })
     }
@@ -354,9 +354,11 @@ fn deduplicate_matches(mut matches: Vec<PiiMatch>) -> Vec<PiiMatch> {
 
     // Sort by start position, then by confidence descending
     matches.sort_by(|a, b| {
-        a.start
-            .cmp(&b.start)
-            .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+        a.start.cmp(&b.start).then(
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
 
     let mut result: Vec<PiiMatch> = Vec::new();
@@ -620,8 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_backend_clamps_confidence() {
-        let response =
-            r#"[{"rule_name": "x", "start": 0, "end": 3, "confidence": 1.5, "level": "sensitive"}]"#;
+        let response = r#"[{"rule_name": "x", "start": 0, "end": 3, "confidence": 1.5, "level": "sensitive"}]"#;
         let backend = LlmBackend::new(Box::new(MockLlm {
             response: response.to_string(),
         }));

@@ -35,20 +35,10 @@ impl DingTalkAdapter {
         }
     }
 
-    /// Resolve credentials from environment variables
+    /// Resolve credentials from env var or inline value
     fn resolve_credentials(config: &DingTalkConfig) -> Result<(String, String)> {
-        let app_key = std::env::var(&config.app_key_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve DingTalk app_key from env var: {}",
-                config.app_key_ref
-            ))
-        })?;
-        let app_secret = std::env::var(&config.app_secret_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve DingTalk app_secret from env var: {}",
-                config.app_secret_ref
-            ))
-        })?;
+        let app_key = super::resolve_credential(&config.app_key)?;
+        let app_secret = super::resolve_credential(&config.app_secret)?;
         Ok((app_key, app_secret))
     }
 
@@ -58,10 +48,18 @@ impl DingTalkAdapter {
             return Ok(token.clone());
         }
 
-        let app_key = self.app_key.read().await.as_ref()
+        let app_key = self
+            .app_key
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("DingTalk app_key not initialized".to_string()))?
             .clone();
-        let app_secret = self.app_secret.read().await.as_ref()
+        let app_secret = self
+            .app_secret
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("DingTalk app_secret not initialized".to_string()))?
             .clone();
 
@@ -70,17 +68,14 @@ impl DingTalkAdapter {
             app_key, app_secret
         );
 
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| Error::Channel(format!("Failed to get DingTalk access token: {}", e)))?;
+        let response =
+            self.client.get(&url).send().await.map_err(|e| {
+                Error::Channel(format!("Failed to get DingTalk access token: {}", e))
+            })?;
 
-        let result: DingTalkTokenResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::Channel(format!("Failed to parse DingTalk token response: {}", e)))?;
+        let result: DingTalkTokenResponse = response.json().await.map_err(|e| {
+            Error::Channel(format!("Failed to parse DingTalk token response: {}", e))
+        })?;
 
         if result.errcode != 0 {
             return Err(Error::Channel(format!(
@@ -291,8 +286,8 @@ mod tests {
 
     fn create_test_config() -> DingTalkConfig {
         DingTalkConfig {
-            app_key_ref: "TEST_DINGTALK_KEY".to_string(),
-            app_secret_ref: "TEST_DINGTALK_SECRET".to_string(),
+            app_key: "TEST_DINGTALK_KEY".to_string(),
+            app_secret: "TEST_DINGTALK_SECRET".to_string(),
             robot_code: "robot_test".to_string(),
             allowed_users: vec!["staff001".to_string(), "staff002".to_string()],
             dm_policy: "pairing".to_string(),
@@ -311,8 +306,8 @@ mod tests {
     #[test]
     fn test_resolve_credentials_missing() {
         let config = DingTalkConfig {
-            app_key_ref: "NONEXISTENT_DT_KEY".to_string(),
-            app_secret_ref: "NONEXISTENT_DT_SECRET".to_string(),
+            app_key: "".to_string(),
+            app_secret: "".to_string(),
             robot_code: "robot_test".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
@@ -436,7 +431,9 @@ mod tests {
 
         adapter.start(tx).await.unwrap();
 
-        let result = adapter.edit_message("chat123", "msg123", "new content").await;
+        let result = adapter
+            .edit_message("chat123", "msg123", "new content")
+            .await;
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("not supported"));

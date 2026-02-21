@@ -1,6 +1,6 @@
 //! Privacy classifier for detecting sensitive data
 //!
-//! Thin wrapper around `a3s_privacy::RegexClassifier` that preserves the
+//! Thin wrapper around `a3s_common::privacy::RegexClassifier` that preserves the
 //! existing safeclaw API (field names, method signatures) while delegating
 //! to the shared implementation.
 //!
@@ -39,17 +39,18 @@ pub struct Match {
 
 /// Privacy classifier for detecting sensitive data.
 ///
-/// Wraps `a3s_privacy::RegexClassifier` with the safeclaw-specific API.
+/// Wraps `a3s_common::privacy::RegexClassifier` with the safeclaw-specific API.
 pub struct Classifier {
-    inner: a3s_privacy::RegexClassifier,
+    inner: a3s_common::privacy::RegexClassifier,
 }
 
 impl Classifier {
     /// Create a new classifier with the given rules
     pub fn new(rules: Vec<ClassificationRule>, default_level: SensitivityLevel) -> Result<Self> {
-        let inner = a3s_privacy::RegexClassifier::new(&rules, default_level).map_err(|e| {
-            Error::Privacy(format!("Failed to compile classification rules: {}", e))
-        })?;
+        let inner =
+            a3s_common::privacy::RegexClassifier::new(&rules, default_level).map_err(|e| {
+                Error::Privacy(format!("Failed to compile classification rules: {}", e))
+            })?;
         Ok(Self { inner })
     }
 
@@ -61,10 +62,10 @@ impl Classifier {
             .matches
             .into_iter()
             .map(|m| {
-                let redacted = a3s_privacy::redact_text(
+                let redacted = a3s_common::privacy::redact_text(
                     &m.matched_text,
                     &m.rule_name,
-                    a3s_privacy::RedactionStrategy::Mask,
+                    a3s_common::privacy::RedactionStrategy::Mask,
                 );
                 Match {
                     rule_name: m.rule_name,
@@ -86,7 +87,7 @@ impl Classifier {
     /// Redact sensitive data in text
     pub fn redact(&self, text: &str) -> String {
         self.inner
-            .redact(text, a3s_privacy::RedactionStrategy::Mask)
+            .redact(text, a3s_common::privacy::RedactionStrategy::Mask)
     }
 
     /// Check if text contains any sensitive data

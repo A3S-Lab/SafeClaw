@@ -11,6 +11,7 @@
 use crate::agent::session_store::AgentSessionStore;
 use crate::agent::types::*;
 use a3s_code::agent::AgentEvent;
+use a3s_code::commands::{CommandAction, CommandContext, CommandRegistry};
 use a3s_code::config::CodeConfig;
 use a3s_code::session::SessionManager;
 use std::collections::HashMap;
@@ -23,9 +24,15 @@ use tokio::sync::{mpsc, RwLock};
 /// pending permissions) alongside the a3s-code session lifecycle.
 pub struct AgentEngine {
     session_manager: Arc<SessionManager>,
-    code_config: CodeConfig,
+    code_config: Arc<RwLock<CodeConfig>>,
     sessions: Arc<RwLock<HashMap<String, EngineSession>>>,
     store: Arc<AgentSessionStore>,
+    /// Optional agent bus for inter-session messaging
+    agent_bus: Arc<RwLock<Option<Arc<crate::agent::bus::AgentBus>>>>,
+    /// Path to the HCL config file (for live updates via API)
+    config_path: Arc<RwLock<Option<std::path::PathBuf>>>,
+    /// Slash command registry (shared across sessions)
+    command_registry: Arc<CommandRegistry>,
 }
 
 /// Per-session UI state tracked by the engine.
@@ -42,9 +49,44 @@ struct EngineSession {
     cwd: String,
     model: Option<String>,
     permission_mode: Option<String>,
+    /// Bound persona ID (if any)
+    persona_id: Option<String>,
 }
 
 impl AgentEngine {
+    /// Access a snapshot of the code configuration.
+    pub async fn code_config(&self) -> CodeConfig {
+        self.code_config.read().await.clone()
+    }
+
+    /// Replace the code configuration and hot-swap the default LLM client.
+    ///
+    /// Updates both the in-memory config and the SessionManager's default LLM
+    /// so all subsequent sessions (and sessions without a per-session client)
+    /// immediately use the new model without a restart.
+    pub async fn update_code_config(&self, new_config: CodeConfig) {
+        // Build new default LLM client from updated config
+        let new_llm = new_config
+            .default_llm_config()
+            .map(|llm_cfg| a3s_code::llm::create_client_with_config(llm_cfg));
+
+        // Hot-swap SessionManager's default client
+        self.session_manager.set_default_llm(new_llm).await;
+
+        // Update in-memory config
+        *self.code_config.write().await = new_config;
+    }
+
+    /// Set the path to the HCL config file so the API can persist changes.
+    pub async fn set_config_path(&self, path: std::path::PathBuf) {
+        *self.config_path.write().await = Some(path);
+    }
+
+    /// Get the config file path (if set).
+    pub async fn get_config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_path.read().await.clone()
+    }
+
     /// Create a new engine from a pre-built `SessionManager` and config.
     pub async fn new(
         session_manager: Arc<SessionManager>,
@@ -53,9 +95,12 @@ impl AgentEngine {
     ) -> crate::Result<Self> {
         let engine = Self {
             session_manager,
-            code_config,
+            code_config: Arc::new(RwLock::new(code_config)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             store,
+            agent_bus: Arc::new(RwLock::new(None)),
+            config_path: Arc::new(RwLock::new(None)),
+            command_registry: Arc::new(CommandRegistry::new()),
         };
 
         // Restore persisted UI state from disk
@@ -77,6 +122,10 @@ impl AgentEngine {
         model: Option<String>,
         permission_mode: Option<String>,
         cwd: Option<String>,
+        persona_id: Option<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        system_prompt_override: Option<String>,
     ) -> crate::Result<AgentProcessInfo> {
         let workspace = cwd.unwrap_or_else(|| {
             std::env::current_dir()
@@ -85,16 +134,28 @@ impl AgentEngine {
                 .to_string()
         });
 
+        // Resolve persona system prompt, with override taking precedence
+        let system_prompt = if system_prompt_override.is_some() {
+            system_prompt_override
+        } else if let Some(ref pid) = persona_id {
+            self.resolve_persona_system_prompt(pid).await
+        } else {
+            None
+        };
+
         // Build a3s-code session config
         let mut session_config = a3s_code::session::SessionConfig {
             name: String::new(),
             workspace: workspace.clone(),
+            system_prompt,
             ..Default::default()
         };
 
-        // Set permission policy based on mode
+        // Set permission/confirmation policy based on mode
         if let Some(ref mode) = permission_mode {
-            session_config.permission_policy = Some(permission_mode_to_policy(mode));
+            let (perm, confirm) = permission_mode_to_policies(mode);
+            session_config.permission_policy = Some(perm);
+            session_config.confirmation_policy = Some(confirm);
         }
 
         // Create a3s-code session
@@ -102,12 +163,23 @@ impl AgentEngine {
             .create_session(session_id.to_string(), session_config)
             .await
             .map_err(|e| {
-                crate::Error::Gateway(format!("Failed to create a3s-code session: {}", e))
+                crate::Error::Runtime(format!("Failed to create a3s-code session: {}", e))
             })?;
 
-        // Configure model-specific LLM client if requested
+        // Configure LLM client — prefer explicit credentials, fall back to config lookup
         if let Some(ref model_id) = model {
-            if let Err(e) = self.configure_model_for_session(session_id, model_id).await {
+            let result = if api_key.is_some() || base_url.is_some() {
+                self.configure_model_with_credentials(
+                    session_id,
+                    model_id,
+                    api_key.as_deref(),
+                    base_url.as_deref(),
+                )
+                .await
+            } else {
+                self.configure_model_for_session(session_id, model_id).await
+            };
+            if let Err(e) = result {
                 tracing::warn!(
                     session_id = %session_id,
                     model = %model_id,
@@ -122,10 +194,13 @@ impl AgentEngine {
             .unwrap_or_default()
             .as_secs();
 
+        let mut state = AgentSessionState::new(session_id.to_string());
+        state.persona_id = persona_id.clone();
+
         let engine_session = EngineSession {
             id: session_id.to_string(),
             browser_senders: HashMap::new(),
-            state: AgentSessionState::new(session_id.to_string()),
+            state,
             message_history: Vec::new(),
             pending_permissions: HashMap::new(),
             generation_handle: None,
@@ -135,6 +210,7 @@ impl AgentEngine {
             cwd: workspace.clone(),
             model: model.clone(),
             permission_mode: permission_mode.clone(),
+            persona_id: persona_id.clone(),
         };
 
         // Update state fields
@@ -169,6 +245,7 @@ impl AgentEngine {
             cli_session_id: None,
             archived: false,
             name: None,
+            persona_id,
         };
 
         Ok(info)
@@ -284,6 +361,9 @@ impl AgentEngine {
             }
         }
 
+        // Single-user desktop app — only one browser connection per session.
+        // Drop all previous senders before registering the new one.
+        es.browser_senders.clear();
         es.browser_senders.insert(browser_id.to_string(), sender);
         true
     }
@@ -326,6 +406,85 @@ impl AgentEngine {
                         let json = serde_json::to_string(&user_msg).unwrap_or_default();
                         for sender in es.browser_senders.values() {
                             let _ = sender.send(json.clone());
+                        }
+                    }
+                }
+
+                // Slash command interception — dispatch before LLM
+                tracing::debug!(session_id = %session_id, content = %content, content_bytes = ?content.as_bytes(), "Received user message");
+                if CommandRegistry::is_command(&content) {
+                    tracing::info!(session_id = %session_id, content = %content, "Slash command detected");
+                    let ctx = self.build_command_context(session_id).await;
+                    if let Some(output) = self.command_registry.dispatch(&content, &ctx) {
+                        let cmd_name = content.trim().split_whitespace().next().unwrap_or("/");
+                        tracing::info!(session_id = %session_id, command = %cmd_name, "Slash command dispatched");
+
+                        // Handle post-command actions
+                        if let Some(ref action) = output.action {
+                            match action {
+                                CommandAction::Compact => {
+                                    let _ = self.session_manager.compact(session_id).await;
+                                }
+                                CommandAction::ClearHistory => {
+                                    let _ = self.session_manager.clear(session_id).await;
+                                    // Also clear engine-side message history
+                                    let mut sessions = self.sessions.write().await;
+                                    if let Some(es) = sessions.get_mut(session_id) {
+                                        es.message_history.clear();
+                                        es.state.num_turns = 0;
+                                        self.persist_session(es);
+                                    }
+                                }
+                                CommandAction::SwitchModel(model) => {
+                                    if let Err(e) = self.configure_model_for_session(session_id, model).await {
+                                        tracing::warn!(session_id, model = %model, "Failed to switch model via /model: {}", e);
+                                    } else {
+                                        let mut sessions = self.sessions.write().await;
+                                        if let Some(es) = sessions.get_mut(session_id) {
+                                            es.model = Some(model.clone());
+                                            es.state.model = model.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Send command response to browser
+                        self.broadcast(
+                            session_id,
+                            &BrowserIncomingMessage::CommandResponse {
+                                command: cmd_name.to_string(),
+                                text: output.text,
+                                state_changed: output.state_changed,
+                            },
+                        )
+                        .await;
+                        // Ensure browser clears running state (no generation was started)
+                        self.broadcast(
+                            session_id,
+                            &BrowserIncomingMessage::StatusChange {
+                                status: Some("idle".to_string()),
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                }
+
+                // Auto-configure LLM if not yet set (e.g. session created before credentials were available)
+                {
+                    let cfg = self.code_config.read().await;
+                    if let Some(default_model) = cfg.default_model.clone() {
+                        drop(cfg);
+                        if let Err(e) = self
+                            .configure_model_for_session(session_id, &default_model)
+                            .await
+                        {
+                            tracing::debug!(
+                                session_id = %session_id,
+                                "Auto-configure skipped (already configured or no config): {}",
+                                e
+                            );
                         }
                     }
                 }
@@ -399,10 +558,10 @@ impl AgentEngine {
                 }
             }
             BrowserOutgoingMessage::SetPermissionMode { mode } => {
-                let policy = permission_mode_to_policy(&mode);
+                let (_perm, confirm) = permission_mode_to_policies(&mode);
                 if let Err(e) = self
                     .session_manager
-                    .set_permission_policy(session_id, policy)
+                    .set_confirmation_policy(session_id, confirm)
                     .await
                 {
                     tracing::warn!(
@@ -418,6 +577,22 @@ impl AgentEngine {
                         es.state.permission_mode = mode;
                     }
                 }
+            }
+            BrowserOutgoingMessage::SendAgentMessage { target, content } => {
+                if let Err(e) = self
+                    .publish_agent_message(session_id, &target, &content)
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        target = %target,
+                        "Failed to publish agent message: {}",
+                        e
+                    );
+                }
+            }
+            BrowserOutgoingMessage::SetAutoExecute { enabled } => {
+                self.set_auto_execute(session_id, enabled).await;
             }
         }
     }
@@ -613,20 +788,26 @@ impl AgentEngine {
     /// Generate a text response for a channel message.
     ///
     /// Unlike `spawn_generation` (browser WebSocket), this method collects all
-    /// streaming events and returns the final text. Used by the Gateway's event
+    /// streaming events and returns the final text. Used by the Runtime's event
     /// processor to handle messages from Telegram, Slack, Discord, etc.
     ///
     /// If no agent session exists for the given ID, one is created with
     /// `trust` permission mode (auto-approve all tool calls for chat channels).
-    pub async fn generate_response(
-        &self,
-        session_id: &str,
-        prompt: &str,
-    ) -> crate::Result<String> {
-        // Ensure agent session exists
+    pub async fn generate_response(&self, session_id: &str, prompt: &str) -> crate::Result<String> {
+        // Ensure agent session exists, configured with the default model
         if self.get_session(session_id).await.is_none() {
-            self.create_session(session_id, None, Some("trust".to_string()), None)
-                .await?;
+            let default_model = self.code_config.read().await.default_model.clone();
+            self.create_session(
+                session_id,
+                default_model,
+                Some("trust".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
         }
 
         // Start streaming generation
@@ -634,31 +815,35 @@ impl AgentEngine {
             .session_manager
             .generate_streaming(session_id, prompt)
             .await
-            .map_err(|e| {
-                crate::Error::Gateway(format!("Failed to start generation: {}", e))
-            })?;
+            .map_err(|e| crate::Error::Runtime(format!("Failed to start generation: {}", e)))?;
 
-        // Collect text from streaming events
+        // Collect text from streaming events with a timeout
         let mut text = String::new();
-        while let Some(event) = event_rx.recv().await {
-            match &event {
-                AgentEvent::TextDelta { text: delta } => {
-                    text.push_str(delta);
-                }
-                AgentEvent::End {
-                    text: final_text, ..
-                } => {
-                    if !final_text.is_empty() {
-                        return Ok(final_text.clone());
+        let timeout_duration = std::time::Duration::from_secs(120);
+        loop {
+            match tokio::time::timeout(timeout_duration, event_rx.recv()).await {
+                Ok(Some(event)) => match &event {
+                    AgentEvent::TextDelta { text: delta } => {
+                        text.push_str(delta);
                     }
+                    AgentEvent::End {
+                        text: final_text, ..
+                    } => {
+                        if !final_text.is_empty() {
+                            return Ok(final_text.clone());
+                        }
+                        break;
+                    }
+                    AgentEvent::Error { message } => {
+                        return Err(crate::Error::Runtime(format!("Agent error: {}", message)));
+                    }
+                    _ => {}
+                },
+                Ok(None) => break, // channel closed
+                Err(_) => {
+                    tracing::warn!(session_id, "Agent generation timed out after 120s");
+                    break;
                 }
-                AgentEvent::Error { message } => {
-                    return Err(crate::Error::Gateway(format!(
-                        "Agent error: {}",
-                        message
-                    )));
-                }
-                _ => {}
             }
         }
 
@@ -667,6 +852,40 @@ impl AgentEngine {
         } else {
             Ok(text)
         }
+    }
+
+    /// Start streaming generation and return the event receiver.
+    ///
+    /// Unlike `generate_response` which collects all events into a final string,
+    /// this returns the raw event receiver so callers can process events
+    /// incrementally (e.g., for progressive message updates in chat channels).
+    pub async fn generate_response_streaming(
+        &self,
+        session_id: &str,
+        prompt: &str,
+    ) -> crate::Result<(
+        mpsc::Receiver<AgentEvent>,
+        tokio::task::JoinHandle<anyhow::Result<a3s_code::agent::AgentResult>>,
+    )> {
+        if self.get_session(session_id).await.is_none() {
+            let default_model = self.code_config.read().await.default_model.clone();
+            self.create_session(
+                session_id,
+                default_model,
+                Some("trust".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        }
+
+        self.session_manager
+            .generate_streaming(session_id, prompt)
+            .await
+            .map_err(|e| crate::Error::Runtime(format!("Failed to start generation: {}", e)))
     }
 
     // =========================================================================
@@ -685,8 +904,157 @@ impl AgentEngine {
         }
     }
 
+    // =========================================================================
+    // Agent bus integration
+    // =========================================================================
+
+    /// Attach an `AgentBus` to this engine.
+    ///
+    /// Called once during Runtime startup after the bus is created.
+    pub async fn set_bus(&self, bus: Arc<crate::agent::bus::AgentBus>) {
+        *self.agent_bus.write().await = Some(bus);
+    }
+
+    /// Publish a message to another agent via the event bus.
+    ///
+    /// `target`: `"broadcast:<topic>"` or `"mention:<session_id>"`
+    pub async fn publish_agent_message(
+        &self,
+        from_session_id: &str,
+        target: &str,
+        content: &str,
+    ) -> crate::Result<()> {
+        let bus = self.agent_bus.read().await;
+        match bus.as_ref() {
+            Some(b) => b.publish(from_session_id, target, content).await,
+            None => Err(crate::Error::Runtime(
+                "Agent bus not configured".to_string(),
+            )),
+        }
+    }
+
+    /// Set auto-execute mode for incoming agent messages on a session.
+    pub async fn set_auto_execute(&self, session_id: &str, enabled: bool) {
+        let bus = self.agent_bus.read().await;
+        if let Some(b) = bus.as_ref() {
+            b.set_auto_execute(session_id, enabled).await;
+        }
+    }
+
+    /// Get auto-execute mode for a session (default: false).
+    pub async fn get_auto_execute(&self, session_id: &str) -> bool {
+        let bus = self.agent_bus.read().await;
+        match bus.as_ref() {
+            Some(b) => b.get_auto_execute(session_id).await,
+            None => false,
+        }
+    }
+
+    /// Broadcast a message to all browser connections for a session (public).
+    ///
+    /// Used by `AgentBus` to deliver incoming agent messages to the browser.
+    pub async fn broadcast_to_session(&self, session_id: &str, msg: &BrowserIncomingMessage) {
+        self.broadcast(session_id, msg).await;
+    }
+
+    // =========================================================================
+    // Slash commands
+    // =========================================================================
+
+    /// Build a `CommandContext` for slash command dispatch.
+    async fn build_command_context(&self, session_id: &str) -> CommandContext {
+        let sessions = self.sessions.read().await;
+        let es = sessions.get(session_id);
+
+        let (workspace, model, history_len, total_cost) = match es {
+            Some(es) => (
+                es.cwd.clone(),
+                es.model.clone().unwrap_or_default(),
+                es.message_history.len(),
+                es.state.total_cost_usd,
+            ),
+            None => (String::new(), String::new(), 0, 0.0),
+        };
+
+        let tool_names: Vec<String> = self
+            .session_manager
+            .list_tools()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        CommandContext {
+            session_id: session_id.to_string(),
+            workspace,
+            model,
+            history_len,
+            total_tokens: 0,
+            total_cost,
+            tool_names,
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    /// List all available slash commands (name + description).
+    pub fn list_commands(&self) -> Vec<(&str, &str)> {
+        self.command_registry.list()
+    }
+
+    /// Resolve a persona's system prompt content by ID.
+    ///
+    /// Looks up the persona skill from the session manager's skill registry
+    /// and returns its content for injection as the session system prompt.
+    async fn resolve_persona_system_prompt(&self, persona_id: &str) -> Option<String> {
+        let registry = self.session_manager.skill_registry().await?;
+        let skill = registry.get(persona_id)?;
+        if skill.kind != a3s_code::skills::SkillKind::Persona {
+            tracing::warn!(persona_id, "Skill exists but is not a Persona kind");
+            return None;
+        }
+        Some(skill.content.clone())
+    }
+
+    /// List all available personas from the skill registry.
+    pub async fn list_personas(&self) -> Vec<PersonaInfo> {
+        let Some(registry) = self.session_manager.skill_registry().await else {
+            return Vec::new();
+        };
+        registry
+            .personas()
+            .into_iter()
+            .map(|s| PersonaInfo {
+                id: s.name.clone(),
+                name: s.name.clone(),
+                description: s.description.clone(),
+                tags: s.tags.clone(),
+                version: s.version.clone(),
+            })
+            .collect()
+    }
+
     /// Configure the LLM client for a session based on model ID.
     ///
+    /// Public wrapper for configure_model_for_session (used by handler)
+    pub async fn configure_model_for_session_pub(
+        &self,
+        session_id: &str,
+        model_id: &str,
+    ) -> crate::Result<()> {
+        self.configure_model_for_session(session_id, model_id).await
+    }
+
+    /// Public wrapper for configure_model_with_credentials (used by handler)
+    pub async fn configure_model_with_credentials_pub(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> crate::Result<()> {
+        self.configure_model_with_credentials(session_id, model_id, api_key, base_url)
+            .await
+    }
+
     /// Searches all providers for the given model ID and constructs the
     /// appropriate `LlmConfig`.
     async fn configure_model_for_session(
@@ -694,23 +1062,84 @@ impl AgentEngine {
         session_id: &str,
         model_id: &str,
     ) -> crate::Result<()> {
-        // Search across all providers for this model
-        let llm_config = self
-            .code_config
-            .providers
-            .iter()
-            .find_map(|p| self.code_config.llm_config(&p.name, model_id))
-            .ok_or_else(|| {
-                crate::Error::Gateway(format!(
-                    "No LLM config found for model '{}' in code config",
-                    model_id
-                ))
-            })?;
+        // model_id may be "provider/model" format or just "model"
+        let cfg = self.code_config.read().await;
+        let llm_config = if let Some((provider_name, bare_model)) = model_id.split_once('/') {
+            // Explicit provider/model format — look up directly
+            cfg.llm_config(provider_name, bare_model)
+        } else {
+            // Bare model ID — search across all providers
+            cfg.providers
+                .iter()
+                .find_map(|p| cfg.llm_config(&p.name, model_id))
+        }
+        .ok_or_else(|| {
+            crate::Error::Runtime(format!(
+                "No LLM config found for model '{}' in code config",
+                model_id
+            ))
+        })?;
 
         self.session_manager
             .configure(session_id, None, None, Some(llm_config))
             .await
-            .map_err(|e| crate::Error::Gateway(format!("Failed to configure session: {}", e)))
+            .map_err(|e| crate::Error::Runtime(format!("Failed to configure session: {}", e)))
+    }
+
+    /// Configure LLM client for a session using explicit credentials (api_key / base_url).
+    /// Used when the frontend passes credentials directly rather than relying on HCL config.
+    async fn configure_model_with_credentials(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        api_key: Option<&str>,
+        base_url: Option<&str>,
+    ) -> crate::Result<()> {
+        use a3s_code::llm::factory::LlmConfig;
+
+        // Determine provider from "provider/model" format or fall back to config lookup
+        let (provider, bare_model) = if let Some((p, m)) = model_id.split_once('/') {
+            (p.to_string(), m.to_string())
+        } else {
+            let cfg = self.code_config.read().await;
+            let provider = cfg
+                .providers
+                .iter()
+                .find(|p| p.models.iter().any(|m| m.id == model_id))
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "anthropic".to_string());
+            (provider, model_id.to_string())
+        };
+
+        // If no api_key provided, try to get it from config
+        let resolved_key = if let Some(k) = api_key.filter(|k| !k.is_empty()) {
+            k.to_string()
+        } else {
+            let cfg = self.code_config.read().await;
+            cfg.providers
+                .iter()
+                .find(|p| p.name == provider)
+                .and_then(|p| p.api_key.clone())
+                .unwrap_or_default()
+        };
+
+        let mut llm_config = LlmConfig::new(&provider, &bare_model, resolved_key);
+        if let Some(url) = base_url.filter(|u| !u.is_empty()) {
+            llm_config.base_url = Some(url.to_string());
+        }
+
+        tracing::info!(
+            session_id = %session_id,
+            provider = %provider,
+            model = %bare_model,
+            has_base_url = llm_config.base_url.is_some(),
+            "Configuring LLM with credentials"
+        );
+
+        self.session_manager
+            .configure(session_id, None, None, Some(llm_config))
+            .await
+            .map_err(|e| crate::Error::Runtime(format!("Failed to configure session: {}", e)))
     }
 
     /// Persist an engine session to disk via the store.
@@ -732,7 +1161,7 @@ impl AgentEngine {
         let mut sessions = self.sessions.write().await;
 
         for ps in persisted_sessions {
-            let es = EngineSession {
+            let mut es = EngineSession {
                 id: ps.id.clone(),
                 browser_senders: HashMap::new(),
                 state: ps.state.clone(),
@@ -749,18 +1178,69 @@ impl AgentEngine {
                     Some(ps.state.model.clone())
                 },
                 permission_mode: Some(ps.state.permission_mode.clone()),
+                persona_id: ps.state.persona_id.clone(),
             };
 
-            // Re-create a3s-code session if it doesn't exist already
-            let session_config = a3s_code::session::SessionConfig {
-                name: String::new(),
-                workspace: es.cwd.clone(),
-                ..Default::default()
-            };
-            let _ = self
+            // Try to restore a3s-code session with full LLM history first
+            let restored = self
                 .session_manager
-                .create_session(ps.id.clone(), session_config)
-                .await;
+                .restore_session_by_id(&ps.id)
+                .await
+                .is_ok();
+
+            if !restored {
+                // Fallback: create fresh session if a3s-code store doesn't have it
+                let session_config = a3s_code::session::SessionConfig {
+                    name: String::new(),
+                    workspace: es.cwd.clone(),
+                    ..Default::default()
+                };
+                let _ = self
+                    .session_manager
+                    .create_session(ps.id.clone(), session_config)
+                    .await;
+                tracing::debug!(session_id = %ps.id, "Created fresh a3s-code session (no stored LLM history)");
+            } else {
+                tracing::debug!(session_id = %ps.id, "Restored a3s-code session with LLM history");
+            }
+
+            // Re-apply model config (API keys aren't persisted in a3s-code store).
+            // If the saved model is no longer in config, fall back to the default model.
+            let mut configured = false;
+            if !ps.state.model.is_empty() {
+                if let Err(e) = self
+                    .configure_model_for_session(&ps.id, &ps.state.model)
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %ps.id,
+                        model = %ps.state.model,
+                        "Failed to re-configure saved model after restore: {}, will try default",
+                        e
+                    );
+                } else {
+                    configured = true;
+                }
+            }
+            if !configured {
+                let cfg = self.code_config.read().await;
+                if let Some(ref default_model) = cfg.default_model {
+                    let dm = default_model.clone();
+                    drop(cfg);
+                    if let Err(e) = self.configure_model_for_session(&ps.id, &dm).await {
+                        tracing::warn!(
+                            session_id = %ps.id,
+                            model = %dm,
+                            "Failed to configure default model after restore: {}",
+                            e
+                        );
+                    } else {
+                        // Update session state to reflect the actual model in use
+                        es.model = Some(dm.clone());
+                        es.state.model = dm;
+                    }
+                }
+            }
 
             sessions.insert(ps.id, es);
         }
@@ -801,6 +1281,7 @@ impl EngineSession {
             cli_session_id: None,
             archived: self.archived,
             name: self.name.clone(),
+            persona_id: self.persona_id.clone(),
         }
     }
 }
@@ -868,6 +1349,18 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
                 "total_cost_usd": estimate_cost_from_usage(usage),
             });
             vec![
+                BrowserIncomingMessage::Assistant {
+                    message: AssistantMessageBody {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        msg_type: Some("message".to_string()),
+                        role: "assistant".to_string(),
+                        model: String::new(),
+                        content: vec![ContentBlock::Text { text: text.clone() }],
+                        stop_reason: Some("end_turn".to_string()),
+                        usage: None,
+                    },
+                    parent_tool_use_id: None,
+                },
                 BrowserIncomingMessage::Result { data: result_data },
                 BrowserIncomingMessage::StatusChange {
                     status: Some("idle".to_string()),
@@ -926,7 +1419,7 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
                 vec![]
             }
         }
-        AgentEvent::TodoUpdated { .. } => {
+        AgentEvent::TaskUpdated { .. } => {
             if let Ok(val) = serde_json::to_value(event) {
                 vec![BrowserIncomingMessage::StreamEvent {
                     event: val,
@@ -977,15 +1470,33 @@ pub fn translate_event(event: &AgentEvent) -> Vec<BrowserIncomingMessage> {
         | AgentEvent::PersistenceFailed { .. } => {
             vec![]
         }
+        // Catch-all for any new AgentEvent variants added upstream
+        _ => {
+            vec![]
+        }
     }
 }
 
-/// Convert a permission mode string to a `PermissionPolicy`.
-fn permission_mode_to_policy(mode: &str) -> a3s_code::permissions::PermissionPolicy {
+/// Convert a permission mode string to permission and confirmation policies.
+fn permission_mode_to_policies(
+    mode: &str,
+) -> (
+    a3s_code::permissions::PermissionPolicy,
+    a3s_code::hitl::ConfirmationPolicy,
+) {
     match mode {
-        "plan" | "strict" => a3s_code::permissions::PermissionPolicy::strict(),
-        "yolo" | "permissive" | "trust" => a3s_code::permissions::PermissionPolicy::permissive(),
-        _ => a3s_code::permissions::PermissionPolicy::new(),
+        "plan" | "strict" => (
+            a3s_code::permissions::PermissionPolicy::strict(),
+            a3s_code::hitl::ConfirmationPolicy::enabled(),
+        ),
+        "yolo" | "permissive" | "trust" => (
+            a3s_code::permissions::PermissionPolicy::permissive(),
+            a3s_code::hitl::ConfirmationPolicy::default(),
+        ),
+        _ => (
+            a3s_code::permissions::PermissionPolicy::new(),
+            a3s_code::hitl::ConfirmationPolicy::enabled(),
+        ),
     }
 }
 
@@ -1058,10 +1569,11 @@ mod tests {
             usage: TokenUsage::default(),
         };
         let msgs = translate_event(&event);
-        assert_eq!(msgs.len(), 2);
-        assert!(matches!(msgs[0], BrowserIncomingMessage::Result { .. }));
+        assert_eq!(msgs.len(), 3);
+        assert!(matches!(msgs[0], BrowserIncomingMessage::Assistant { .. }));
+        assert!(matches!(msgs[1], BrowserIncomingMessage::Result { .. }));
         assert!(matches!(
-            msgs[1],
+            msgs[2],
             BrowserIncomingMessage::StatusChange { .. }
         ));
     }
@@ -1188,14 +1700,14 @@ mod tests {
 
     #[test]
     fn test_permission_mode_to_policy() {
-        let strict = permission_mode_to_policy("strict");
-        assert!(strict.enabled);
+        let (perm, _confirm) = permission_mode_to_policies("strict");
+        assert!(perm.enabled);
 
-        let permissive = permission_mode_to_policy("yolo");
-        assert!(permissive.enabled);
+        let (perm, _confirm) = permission_mode_to_policies("yolo");
+        assert!(perm.enabled);
 
-        let default = permission_mode_to_policy("default");
-        assert!(default.enabled);
+        let (perm, _confirm) = permission_mode_to_policies("default");
+        assert!(perm.enabled);
     }
 
     #[test]

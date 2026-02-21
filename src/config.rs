@@ -4,38 +4,116 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Lenient deserializer for the `models` field.
+///
+/// When parsing HCL via `hcl::from_str`, repeated blocks like `providers`
+/// are represented as maps instead of arrays, which causes `CodeConfig`
+/// deserialization to fail. This deserializer catches that error and
+/// returns a default `CodeConfig` — the real value is populated later
+/// by `SafeClawConfig::from_hcl`.
+fn deserialize_models_lenient<'de, D>(
+    deserializer: D,
+) -> Result<a3s_code::config::CodeConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Accept any value; if CodeConfig deserialization fails, return default
+    let value: serde_json::Value = serde_json::Value::deserialize(deserializer)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 /// Main SafeClaw configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SafeClawConfig {
     /// Gateway configuration
-    pub gateway: GatewayConfig,
+    #[serde(default)]
+    pub gateway: ServerConfig,
 
     /// A3S Gateway integration configuration
     #[serde(default)]
     pub a3s_gateway: A3sGatewayConfig,
 
     /// Channel configurations
+    #[serde(default)]
     pub channels: ChannelsConfig,
 
     /// TEE configuration
+    #[serde(default)]
     pub tee: TeeConfig,
 
     /// Privacy configuration
+    #[serde(default)]
     pub privacy: PrivacyConfig,
 
-    /// Model configuration
-    pub models: ModelsConfig,
+    /// Model configuration (a3s-code CodeConfig format).
+    /// Deserialized separately via `SafeClawConfig::from_hcl` to handle
+    /// repeated HCL blocks (providers, models) correctly.
+    #[serde(default, deserialize_with = "deserialize_models_lenient")]
+    pub models: a3s_code::config::CodeConfig,
 
     /// Storage configuration
+    #[serde(default)]
     pub storage: StorageConfig,
 
     /// Audit event pipeline configuration
     #[serde(default)]
     pub audit: AuditConfig,
 
-    /// Proactive task scheduler configuration
+    /// Skills configuration
     #[serde(default)]
-    pub scheduler: SchedulerConfig,
+    pub skills: SkillsConfig,
+}
+
+impl SafeClawConfig {
+    /// Parse configuration from an HCL string.
+    ///
+    /// The `models` block is extracted and parsed via `CodeConfig::from_hcl`
+    /// which handles repeated HCL blocks (`providers`, `models`) as arrays.
+    /// The remaining fields are deserialized via `hcl::from_str` with a
+    /// lenient deserializer for the `models` field.
+    pub fn from_hcl(content: &str) -> anyhow::Result<Self> {
+        // Auto-detect JSON format (legacy safeclaw.local.hcl may be JSON CodeConfig)
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('{') {
+            // Try parsing as CodeConfig JSON first (camelCase fields from old format)
+            if let Ok(code_config) = serde_json::from_str::<a3s_code::config::CodeConfig>(content) {
+                let mut sc = SafeClawConfig::default();
+                sc.models = code_config;
+                return Ok(sc);
+            }
+            // Fall back to SafeClawConfig JSON
+            let config: SafeClawConfig = serde_json::from_str(content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse JSON config: {}", e))?;
+            return Ok(config);
+        }
+
+        // Extract the raw `models { ... }` block for CodeConfig parsing.
+        // We rebuild the inner body as an HCL string by serializing each structure.
+        let body: hcl::Body = hcl::from_str(content)?;
+        let models_inner: Option<String> = body
+            .blocks()
+            .find(|b| b.identifier.as_str() == "models")
+            .map(|b| {
+                let inner_body = hcl::Body::from(b.body().iter().cloned().collect::<Vec<_>>());
+                hcl::to_string(&inner_body).unwrap_or_default()
+            });
+
+        // Parse the models block with CodeConfig::from_hcl (handles repeated blocks)
+        let code_config = if let Some(ref hcl_str) = models_inner {
+            a3s_code::config::CodeConfig::from_hcl(hcl_str)
+                .map_err(|e| anyhow::anyhow!("Failed to parse models config: {}", e))?
+        } else {
+            a3s_code::config::CodeConfig::default()
+        };
+
+        // Parse the rest of the config (models field uses lenient deserializer)
+        let mut config: SafeClawConfig = hcl::from_str(content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SafeClaw config: {}", e))?;
+        config.models = code_config;
+
+        Ok(config)
+    }
 }
 
 /// A3S Gateway integration configuration
@@ -43,6 +121,7 @@ pub struct SafeClawConfig {
 /// When enabled, SafeClaw runs as a backend service behind a3s-gateway.
 /// The gateway handles TLS, routing, rate limiting, and authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct A3sGatewayConfig {
     /// Enable a3s-gateway integration mode
     pub enabled: bool,
@@ -98,7 +177,8 @@ impl Default for A3sGatewayConfig {
 
 /// Gateway configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatewayConfig {
+#[serde(default)]
+pub struct ServerConfig {
     /// Host to bind to
     pub host: String,
 
@@ -121,7 +201,7 @@ pub struct GatewayConfig {
     pub max_connections: usize,
 }
 
-impl Default for GatewayConfig {
+impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".to_string(),
@@ -164,7 +244,7 @@ pub struct ChannelsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
     /// Bot token (stored in TEE)
-    pub bot_token_ref: String,
+    pub bot_token: String,
 
     /// Allowed user IDs
     pub allowed_users: Vec<i64>,
@@ -177,10 +257,10 @@ pub struct TelegramConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlackConfig {
     /// Bot token reference (stored in TEE)
-    pub bot_token_ref: String,
+    pub bot_token: String,
 
     /// App token reference (stored in TEE)
-    pub app_token_ref: String,
+    pub app_token: String,
 
     /// Allowed workspace IDs
     pub allowed_workspaces: Vec<String>,
@@ -193,7 +273,7 @@ pub struct SlackConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordConfig {
     /// Bot token reference (stored in TEE)
-    pub bot_token_ref: String,
+    pub bot_token: String,
 
     /// Allowed guild IDs
     pub allowed_guilds: Vec<u64>,
@@ -204,6 +284,7 @@ pub struct DiscordConfig {
 
 /// WebChat channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebChatConfig {
     /// Enable WebChat
     pub enabled: bool,
@@ -232,13 +313,13 @@ pub struct FeishuConfig {
     pub app_id: String,
 
     /// App secret reference (stored in TEE)
-    pub app_secret_ref: String,
+    pub app_secret: String,
 
     /// Encrypt key reference for callback verification (stored in TEE)
-    pub encrypt_key_ref: String,
+    pub encrypt_key: String,
 
     /// Verification token reference (stored in TEE)
-    pub verification_token_ref: String,
+    pub verification_token: String,
 
     /// Allowed user open_ids (empty = all allowed)
     pub allowed_users: Vec<String>,
@@ -251,10 +332,10 @@ pub struct FeishuConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DingTalkConfig {
     /// App key reference (stored in TEE)
-    pub app_key_ref: String,
+    pub app_key: String,
 
     /// App secret reference (stored in TEE)
-    pub app_secret_ref: String,
+    pub app_secret: String,
 
     /// Robot code identifier
     pub robot_code: String,
@@ -276,13 +357,13 @@ pub struct WeComConfig {
     pub agent_id: u32,
 
     /// Corp secret reference (stored in TEE)
-    pub secret_ref: String,
+    pub secret: String,
 
     /// Encoding AES key reference for callback decryption (stored in TEE)
-    pub encoding_aes_key_ref: String,
+    pub encoding_aes_key: String,
 
     /// Callback token reference (stored in TEE)
-    pub token_ref: String,
+    pub token: String,
 
     /// Allowed user IDs (empty = all allowed)
     pub allowed_users: Vec<String>,
@@ -293,6 +374,7 @@ pub struct WeComConfig {
 
 /// TEE configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TeeConfig {
     /// Enable TEE mode
     pub enabled: bool,
@@ -337,7 +419,7 @@ pub struct TeeConfig {
 
     /// Network firewall policy for outbound connections
     #[serde(default)]
-    pub network_policy: crate::leakage::NetworkPolicy,
+    pub network_policy: crate::guard::NetworkPolicy,
 
     /// Fallback policy when TEE is expected but unavailable.
     /// Controls how the policy engine handles `ProcessInTee` decisions
@@ -372,14 +454,14 @@ impl Default for TeeConfig {
             box_image: "ghcr.io/a3s-lab/safeclaw-tee:latest".to_string(),
             memory_mb: 2048,
             cpu_cores: 2,
-            vsock_port: a3s_transport::ports::TEE_CHANNEL,
+            vsock_port: a3s_common::ports::TEE_CHANNEL,
             attestation: AttestationConfig::default(),
             shim_path: None,
             allow_simulated: false,
             secrets: Vec::new(),
             workspace_dir: None,
             socket_dir: None,
-            network_policy: crate::leakage::NetworkPolicy::default(),
+            network_policy: crate::guard::NetworkPolicy::default(),
             fallback_policy: TeeFallbackPolicy::default(),
         }
     }
@@ -429,6 +511,7 @@ pub enum TeeBackend {
 
 /// Attestation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AttestationConfig {
     /// Enable remote attestation
     pub enabled: bool,
@@ -452,6 +535,7 @@ impl Default for AttestationConfig {
 
 /// Privacy configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PrivacyConfig {
     /// Enable automatic privacy classification
     pub auto_classify: bool,
@@ -477,13 +561,14 @@ impl Default for PrivacyConfig {
     }
 }
 
-// Re-export from shared a3s-privacy crate (single source of truth)
-pub use a3s_privacy::default_classification_rules;
-pub use a3s_privacy::ClassificationRule;
-pub use a3s_privacy::SensitivityLevel;
+// Re-export from shared a3s-common crate (single source of truth)
+pub use a3s_common::privacy::default_classification_rules;
+pub use a3s_common::privacy::ClassificationRule;
+pub use a3s_common::privacy::SensitivityLevel;
 
 /// Data retention configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetentionConfig {
     /// Retention period for normal data in days
     pub normal_days: u32,
@@ -505,182 +590,9 @@ impl Default for RetentionConfig {
     }
 }
 
-/// Model configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelsConfig {
-    /// Default model provider
-    pub default_provider: String,
-
-    /// Model configurations by provider
-    pub providers: HashMap<String, ModelProviderConfig>,
-}
-
-impl Default for ModelsConfig {
-    fn default() -> Self {
-        let mut providers = HashMap::new();
-        providers.insert(
-            "anthropic".to_string(),
-            ModelProviderConfig {
-                api_key_ref: "anthropic_api_key".to_string(),
-                base_url: None,
-                default_model: "claude-sonnet-4-20250514".to_string(),
-                models: vec![
-                    "claude-opus-4-20250514".to_string(),
-                    "claude-sonnet-4-20250514".to_string(),
-                    "claude-haiku-3-5-20241022".to_string(),
-                ],
-            },
-        );
-        providers.insert(
-            "openai".to_string(),
-            ModelProviderConfig {
-                api_key_ref: "openai_api_key".to_string(),
-                base_url: None,
-                default_model: "gpt-4o".to_string(),
-                models: vec![
-                    "gpt-4o".to_string(),
-                    "gpt-4o-mini".to_string(),
-                    "o1".to_string(),
-                ],
-            },
-        );
-
-        Self {
-            default_provider: "anthropic".to_string(),
-            providers,
-        }
-    }
-}
-
-/// Model provider configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelProviderConfig {
-    /// API key reference (stored in TEE)
-    pub api_key_ref: String,
-
-    /// Custom base URL
-    pub base_url: Option<String>,
-
-    /// Default model
-    pub default_model: String,
-
-    /// Available models
-    pub models: Vec<String>,
-}
-
-// =============================================================================
-// ModelsConfig → a3s-code CodeConfig mapping
-// =============================================================================
-
-/// Derive model family from a model ID.
-///
-/// Returns a short family string such as "claude-opus", "claude-sonnet",
-/// "gpt-4o", etc.  Falls back to the full model ID when unrecognised.
-fn infer_family(model_id: &str) -> String {
-    if model_id.starts_with("claude-opus") {
-        "claude-opus".to_string()
-    } else if model_id.starts_with("claude-sonnet-4") {
-        "claude-sonnet-4".to_string()
-    } else if model_id.starts_with("claude-sonnet-3") || model_id.starts_with("claude-3-5-sonnet") {
-        "claude-sonnet-3.5".to_string()
-    } else if model_id.starts_with("claude-haiku") || model_id.starts_with("claude-3-5-haiku") {
-        "claude-haiku".to_string()
-    } else if model_id.starts_with("gpt-4o-mini") {
-        "gpt-4o-mini".to_string()
-    } else if model_id.starts_with("gpt-4o") {
-        "gpt-4o".to_string()
-    } else if model_id.starts_with("o1-mini") {
-        "o1-mini".to_string()
-    } else if model_id == "o1" {
-        "o1".to_string()
-    } else {
-        model_id.to_string()
-    }
-}
-
-/// Resolve API keys from environment variables.
-///
-/// For each provider, the `api_key_ref` field names an environment variable
-/// (e.g. `"anthropic_api_key"` → reads `$ANTHROPIC_API_KEY`).  We try both
-/// the original casing and the UPPER_CASE form.
-pub fn resolve_api_keys_from_env(models: &ModelsConfig) -> HashMap<String, String> {
-    let mut keys = HashMap::new();
-    for (provider_name, cfg) in &models.providers {
-        // Try exact ref, then UPPER_CASE
-        let val = std::env::var(&cfg.api_key_ref)
-            .or_else(|_| std::env::var(cfg.api_key_ref.to_uppercase()));
-        if let Ok(key) = val {
-            keys.insert(provider_name.clone(), key);
-        }
-    }
-    keys
-}
-
-impl ModelsConfig {
-    /// Convert SafeClaw's model configuration into an a3s-code `CodeConfig`.
-    ///
-    /// `resolved_keys` maps provider name → API key string.
-    /// `sessions_dir` is the on-disk directory for session persistence.
-    pub fn to_code_config(
-        &self,
-        resolved_keys: &HashMap<String, String>,
-        sessions_dir: Option<std::path::PathBuf>,
-    ) -> a3s_code::config::CodeConfig {
-        use a3s_code::config::{ModelConfig as CodeModelConfig, ProviderConfig as CodeProvider};
-
-        let providers: Vec<CodeProvider> = self
-            .providers
-            .iter()
-            .map(|(name, cfg)| {
-                let api_key = resolved_keys.get(name).cloned();
-                let models: Vec<CodeModelConfig> = cfg
-                    .models
-                    .iter()
-                    .map(|model_id| {
-                        let family = infer_family(model_id);
-                        let is_anthropic = family.starts_with("claude");
-                        CodeModelConfig {
-                            id: model_id.clone(),
-                            name: model_id.clone(),
-                            family,
-                            api_key: None,
-                            base_url: None,
-                            attachment: is_anthropic,
-                            reasoning: false,
-                            tool_call: true,
-                            temperature: true,
-                            release_date: None,
-                            modalities: a3s_code::config::ModelModalities::default(),
-                            cost: a3s_code::config::ModelCost::default(),
-                            limit: a3s_code::config::ModelLimit::default(),
-                        }
-                    })
-                    .collect();
-                CodeProvider {
-                    name: name.clone(),
-                    api_key,
-                    base_url: cfg.base_url.clone(),
-                    models,
-                }
-            })
-            .collect();
-
-        a3s_code::config::CodeConfig {
-            default_provider: Some(self.default_provider.clone()),
-            default_model: self
-                .providers
-                .get(&self.default_provider)
-                .map(|p| p.default_model.clone()),
-            providers,
-            sessions_dir,
-            storage_backend: a3s_code::config::StorageBackend::File,
-            ..Default::default()
-        }
-    }
-}
-
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     /// Base directory for storage
     pub base_dir: PathBuf,
@@ -712,16 +624,17 @@ impl Default for StorageConfig {
 
 /// Audit event pipeline configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuditConfig {
     /// Broadcast channel / audit log buffer capacity
     pub bus_capacity: usize,
 
     /// Alert monitor configuration
-    pub alert: crate::leakage::AlertConfig,
+    pub alert: crate::audit::AlertConfig,
 
     /// File-based audit persistence configuration
     #[serde(default)]
-    pub persistence: crate::leakage::PersistenceConfig,
+    pub persistence: crate::audit::PersistenceConfig,
 
     /// a3s-event bridge configuration (NATS integration)
     #[serde(default)]
@@ -732,8 +645,8 @@ impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             bus_capacity: 10_000,
-            alert: crate::leakage::AlertConfig::default(),
-            persistence: crate::leakage::PersistenceConfig::default(),
+            alert: crate::audit::AlertConfig::default(),
+            persistence: crate::audit::PersistenceConfig::default(),
             event_bridge: EventBridgeConfig::default(),
         }
     }
@@ -744,6 +657,7 @@ impl Default for AuditConfig {
 /// When enabled, all audit events are forwarded to an `a3s-event::EventBus`
 /// under the `audit.<severity>.<vector>` subject hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EventBridgeConfig {
     /// Enable the a3s-event bridge
     pub enabled: bool,
@@ -763,71 +677,130 @@ impl Default for EventBridgeConfig {
     }
 }
 
-/// Proactive task scheduler configuration
-///
-/// Defines scheduled tasks that run autonomously on a cron schedule.
-/// Each task executes an agent prompt and delivers results to a channel.
+/// Skills configuration for runtime skill management and self-bootstrap
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchedulerConfig {
-    /// Enable the proactive task scheduler
-    pub enabled: bool,
+#[serde(default)]
+pub struct SkillsConfig {
+    /// Directory for storing skill files (.md)
+    #[serde(default = "SkillsConfig::default_dir")]
+    pub dir: String,
 
-    /// Scheduled task definitions
-    #[serde(default)]
-    pub tasks: Vec<ScheduledTaskDef>,
+    /// Auto-load skills from directory on startup
+    #[serde(default = "SkillsConfig::default_auto_load")]
+    pub auto_load: bool,
 }
 
-impl Default for SchedulerConfig {
+impl SkillsConfig {
+    fn default_dir() -> String {
+        "./skills".to_string()
+    }
+
+    fn default_auto_load() -> bool {
+        true
+    }
+}
+
+impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            tasks: Vec::new(),
+            dir: Self::default_dir(),
+            auto_load: Self::default_auto_load(),
         }
     }
 }
 
-/// A scheduled task definition from configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduledTaskDef {
-    /// Human-readable task name
-    pub name: String,
+/// Per-channel agent configuration override.
+///
+/// Stored as a JSON file in `<config_dir>/safeclaw/channel-agents.json`.
+/// Applied at session creation time when a message arrives from a channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelAgentConfig {
+    /// Model override (None = use global default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 
-    /// Cron schedule expression (5 fields: min hour day month weekday)
-    pub schedule: String,
+    /// Permission mode: "default", "strict", or "trust"
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
 
-    /// Agent prompt to execute
-    pub prompt: String,
+    /// Allowed tools (None = all tools allowed)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
 
-    /// Target channel for result delivery (e.g., "telegram", "slack", "webchat")
-    pub channel: String,
-
-    /// Target chat ID within the channel
-    pub chat_id: String,
-
-    /// Result delivery mode
+    /// Blocked tools
     #[serde(default)]
-    pub delivery: DeliveryMode,
-
-    /// Execution timeout in milliseconds (default: 120000 = 2 min)
-    #[serde(default = "default_task_timeout")]
-    pub timeout_ms: u64,
+    pub blocked_tools: Vec<String>,
 }
 
-/// How the agent result is delivered to the target channel
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DeliveryMode {
-    /// Send the full agent response
-    #[default]
-    Full,
-    /// Send a summary (first 500 chars)
-    Summary,
-    /// Send only if the result differs from the previous run
-    Diff,
+fn default_permission_mode() -> String {
+    "default".to_string()
 }
 
-fn default_task_timeout() -> u64 {
-    120_000
+/// Persistent store for per-channel agent configs.
+///
+/// Reads/writes `<config_dir>/safeclaw/channel-agents.json`.
+#[derive(Clone)]
+pub struct ChannelAgentConfigStore {
+    path: std::path::PathBuf,
+    configs: std::sync::Arc<tokio::sync::RwLock<HashMap<String, ChannelAgentConfig>>>,
+}
+
+impl ChannelAgentConfigStore {
+    /// Load or create the config store.
+    pub async fn new(config_dir: std::path::PathBuf) -> Self {
+        let path = config_dir.join("channel-agents.json");
+        let configs = if path.exists() {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
+        };
+        Self {
+            path,
+            configs: std::sync::Arc::new(tokio::sync::RwLock::new(configs)),
+        }
+    }
+
+    /// Get config for a channel.
+    pub async fn get(&self, channel_id: &str) -> Option<ChannelAgentConfig> {
+        self.configs.read().await.get(channel_id).cloned()
+    }
+
+    /// Get all channel configs.
+    pub async fn get_all(&self) -> HashMap<String, ChannelAgentConfig> {
+        self.configs.read().await.clone()
+    }
+
+    /// Update config for a channel and persist to disk.
+    pub async fn set(&self, channel_id: &str, config: ChannelAgentConfig) -> anyhow::Result<()> {
+        {
+            let mut configs = self.configs.write().await;
+            configs.insert(channel_id.to_string(), config);
+        }
+        self.persist().await
+    }
+
+    /// Remove config for a channel and persist.
+    pub async fn remove(&self, channel_id: &str) -> anyhow::Result<()> {
+        {
+            let mut configs = self.configs.write().await;
+            configs.remove(channel_id);
+        }
+        self.persist().await
+    }
+
+    /// Write current state to disk.
+    async fn persist(&self) -> anyhow::Result<()> {
+        let configs = self.configs.read().await;
+        let json = serde_json::to_string_pretty(&*configs)?;
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&self.path, json).await?;
+        Ok(())
+    }
 }
 
 // Helper module for default directories
@@ -886,9 +859,9 @@ mod tests {
     fn test_feishu_config_serialize() {
         let config = FeishuConfig {
             app_id: "cli_test123".to_string(),
-            app_secret_ref: "feishu_secret".to_string(),
-            encrypt_key_ref: "feishu_encrypt".to_string(),
-            verification_token_ref: "feishu_token".to_string(),
+            app_secret: "feishu_secret".to_string(),
+            encrypt_key: "feishu_encrypt".to_string(),
+            verification_token: "feishu_token".to_string(),
             allowed_users: vec!["ou_user1".to_string()],
             dm_policy: "pairing".to_string(),
         };
@@ -901,8 +874,8 @@ mod tests {
     #[test]
     fn test_dingtalk_config_serialize() {
         let config = DingTalkConfig {
-            app_key_ref: "dt_key".to_string(),
-            app_secret_ref: "dt_secret".to_string(),
+            app_key: "dt_key".to_string(),
+            app_secret: "dt_secret".to_string(),
             robot_code: "robot123".to_string(),
             allowed_users: vec!["staff1".to_string(), "staff2".to_string()],
             dm_policy: "open".to_string(),
@@ -918,9 +891,9 @@ mod tests {
         let config = WeComConfig {
             corp_id: "ww_corp123".to_string(),
             agent_id: 1000001,
-            secret_ref: "wc_secret".to_string(),
-            encoding_aes_key_ref: "wc_aes".to_string(),
-            token_ref: "wc_token".to_string(),
+            secret: "wc_secret".to_string(),
+            encoding_aes_key: "wc_aes".to_string(),
+            token: "wc_token".to_string(),
             allowed_users: vec![],
             dm_policy: "pairing".to_string(),
         };
@@ -932,84 +905,19 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_family() {
-        assert_eq!(infer_family("claude-opus-4-20250514"), "claude-opus");
-        assert_eq!(infer_family("claude-sonnet-4-20250514"), "claude-sonnet-4");
-        assert_eq!(
-            infer_family("claude-sonnet-3-5-20241022"),
-            "claude-sonnet-3.5"
-        );
-        assert_eq!(
-            infer_family("claude-3-5-sonnet-20241022"),
-            "claude-sonnet-3.5"
-        );
-        assert_eq!(infer_family("claude-haiku-3-5-20241022"), "claude-haiku");
-        assert_eq!(infer_family("claude-3-5-haiku-20241022"), "claude-haiku");
-        assert_eq!(infer_family("gpt-4o"), "gpt-4o");
-        assert_eq!(infer_family("gpt-4o-mini"), "gpt-4o-mini");
-        assert_eq!(infer_family("o1"), "o1");
-        assert_eq!(infer_family("o1-mini"), "o1-mini");
-        assert_eq!(infer_family("custom-model-v2"), "custom-model-v2");
-    }
-
-    #[test]
-    fn test_to_code_config_basic() {
-        let models = ModelsConfig::default();
-        let mut keys = HashMap::new();
-        keys.insert("anthropic".to_string(), "sk-ant-test".to_string());
-
-        let code_cfg = models.to_code_config(&keys, None);
-
-        assert_eq!(code_cfg.default_provider.as_deref(), Some("anthropic"));
-        assert_eq!(
-            code_cfg.default_model.as_deref(),
-            Some("claude-sonnet-4-20250514")
-        );
-        assert!(!code_cfg.providers.is_empty());
-
-        // Anthropic provider should have the resolved key
-        let anthro = code_cfg.providers.iter().find(|p| p.name == "anthropic");
-        assert!(anthro.is_some());
-        let anthro = anthro.unwrap();
-        assert_eq!(anthro.api_key.as_deref(), Some("sk-ant-test"));
-        assert_eq!(anthro.models.len(), 3);
-        assert_eq!(anthro.models[0].family, "claude-opus");
-    }
-
-    #[test]
-    fn test_to_code_config_no_key() {
-        let models = ModelsConfig::default();
-        let keys = HashMap::new(); // no keys resolved
-        let code_cfg = models.to_code_config(&keys, None);
-
-        let anthro = code_cfg.providers.iter().find(|p| p.name == "anthropic");
-        assert!(anthro.unwrap().api_key.is_none());
-    }
-
-    #[test]
-    fn test_to_code_config_with_sessions_dir() {
-        let models = ModelsConfig::default();
-        let keys = HashMap::new();
-        let dir = std::path::PathBuf::from("/tmp/safeclaw-sessions");
-        let code_cfg = models.to_code_config(&keys, Some(dir.clone()));
-
-        assert_eq!(code_cfg.sessions_dir, Some(dir));
-    }
-
-    #[test]
     fn test_channels_config_with_new_channels() {
         let config = ChannelsConfig {
             feishu: Some(FeishuConfig {
                 app_id: "cli_test".to_string(),
-                app_secret_ref: "secret".to_string(),
-                encrypt_key_ref: "encrypt".to_string(),
-                verification_token_ref: "token".to_string(),
+                app_secret: "secret".to_string(),
+                encrypt_key: "encrypt".to_string(),
+                verification_token: "token".to_string(),
                 allowed_users: vec![],
                 dm_policy: "open".to_string(),
             }),
             dingtalk: Some(DingTalkConfig {
-                app_key_ref: "key".to_string(),
-                app_secret_ref: "secret".to_string(),
+                app_key: "key".to_string(),
+                app_secret: "secret".to_string(),
                 robot_code: "robot".to_string(),
                 allowed_users: vec![],
                 dm_policy: "open".to_string(),
@@ -1017,9 +925,9 @@ mod tests {
             wecom: Some(WeComConfig {
                 corp_id: "corp".to_string(),
                 agent_id: 100,
-                secret_ref: "secret".to_string(),
-                encoding_aes_key_ref: "aes".to_string(),
-                token_ref: "token".to_string(),
+                secret: "secret".to_string(),
+                encoding_aes_key: "aes".to_string(),
+                token: "token".to_string(),
                 allowed_users: vec![],
                 dm_policy: "open".to_string(),
             }),

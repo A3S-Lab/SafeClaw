@@ -7,12 +7,13 @@
 //! at startup (Phase 11 architecture). SafeClaw runs as a guest inside the TEE,
 //! not as a host that boots VMs.
 
+use crate::audit::AuditEventBus;
 use crate::config::{SensitivityLevel, TeeConfig};
 use crate::error::{Error, Result};
-use crate::leakage::{
-    AuditEventBus, FirewallResult, InjectionDetector, InjectionVerdict, InterceptResult,
-    NetworkFirewall, OutputSanitizer, SanitizeResult, SessionIsolation, ToolInterceptor,
+use crate::guard::{
+    FirewallResult, InjectionVerdict, InterceptResult, SanitizeResult, SessionIsolation,
 };
+use crate::privacy::{CumulativeRiskDecision, PrivacyPipeline, SessionPrivacyContext};
 use crate::tee::TeeRuntime;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -62,6 +63,8 @@ pub struct Session {
     metadata: Arc<RwLock<HashMap<String, serde_json::Value>>>,
     /// Whether this session has been upgraded to TEE
     tee_active: Arc<RwLock<bool>>,
+    /// Per-session cumulative privacy context for split-message attack defense
+    privacy_context: Arc<RwLock<SessionPrivacyContext>>,
 }
 
 impl Session {
@@ -80,6 +83,7 @@ impl Session {
             message_count: Arc::new(RwLock::new(0)),
             metadata: Arc::new(RwLock::new(HashMap::new())),
             tee_active: Arc::new(RwLock::new(false)),
+            privacy_context: Arc::new(RwLock::new(SessionPrivacyContext::new())),
         }
     }
 
@@ -134,6 +138,32 @@ impl Session {
         *self.sensitivity_level.read().await
     }
 
+    /// Record PII disclosures from a classification result.
+    ///
+    /// Called by `SessionRouter::route()` after each message is classified.
+    /// Feeds the cumulative privacy context used for split-message attack detection.
+    pub async fn record_disclosures(&self, rule_names: &[String], sensitivity: SensitivityLevel) {
+        self.privacy_context
+            .write()
+            .await
+            .record_disclosures(rule_names, sensitivity);
+    }
+
+    /// Assess cumulative PII risk for this session.
+    ///
+    /// Returns `CumulativeRiskDecision::Reject` when the session has disclosed
+    /// `reject_threshold` or more distinct PII types across all messages.
+    pub async fn assess_privacy_risk(
+        &self,
+        warn_threshold: usize,
+        reject_threshold: usize,
+    ) -> CumulativeRiskDecision {
+        self.privacy_context
+            .read()
+            .await
+            .assess_risk(warn_threshold, reject_threshold)
+    }
+
     /// Set metadata value
     pub async fn set_metadata(&self, key: impl Into<String>, value: serde_json::Value) {
         self.metadata.write().await.insert(key.into(), value);
@@ -153,7 +183,6 @@ impl Session {
     pub async fn uses_tee(&self) -> bool {
         *self.tee_active.read().await
     }
-
 }
 
 /// Unified session manager handling both regular and TEE sessions.
@@ -166,14 +195,8 @@ pub struct SessionManager {
     tee_config: TeeConfig,
     /// TEE runtime for self-detection and sealed storage (Phase 11)
     tee_runtime: Arc<TeeRuntime>,
-    /// Per-session data isolation (taint registries + audit logs)
-    isolation: Arc<SessionIsolation>,
-    /// Prompt injection detector
-    injection_detector: Arc<InjectionDetector>,
-    /// Network firewall for outbound connection control
-    network_firewall: Arc<NetworkFirewall>,
-    /// Centralized audit event bus
-    audit_bus: Arc<AuditEventBus>,
+    /// Unified privacy + protection pipeline
+    pipeline: PrivacyPipeline,
 }
 
 impl SessionManager {
@@ -183,16 +206,13 @@ impl SessionManager {
     /// The runtime detects TEE hardware at startup — no VM boot needed.
     pub fn new(tee_config: TeeConfig, audit_bus: Arc<AuditEventBus>) -> Self {
         let tee_runtime = Arc::new(TeeRuntime::process_only());
-        let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
+        let pipeline = PrivacyPipeline::new(tee_config.network_policy.clone(), audit_bus);
         Self {
             sessions: Arc::new(DashMap::new()),
             user_sessions: Arc::new(DashMap::new()),
             tee_config,
             tee_runtime,
-            isolation: Arc::new(SessionIsolation::default()),
-            injection_detector: Arc::new(InjectionDetector::new()),
-            network_firewall,
-            audit_bus,
+            pipeline,
         }
     }
 
@@ -202,16 +222,13 @@ impl SessionManager {
         tee_runtime: Arc<TeeRuntime>,
         audit_bus: Arc<AuditEventBus>,
     ) -> Self {
-        let network_firewall = Arc::new(NetworkFirewall::new(tee_config.network_policy.clone()));
+        let pipeline = PrivacyPipeline::new(tee_config.network_policy.clone(), audit_bus);
         Self {
             sessions: Arc::new(DashMap::new()),
             user_sessions: Arc::new(DashMap::new()),
             tee_config,
             tee_runtime,
-            isolation: Arc::new(SessionIsolation::default()),
-            injection_detector: Arc::new(InjectionDetector::new()),
-            network_firewall,
-            audit_bus,
+            pipeline,
         }
     }
 
@@ -240,9 +257,8 @@ impl SessionManager {
         tracing::info!("Shutting down TEE subsystem");
 
         // Terminate all active sessions
-        let sessions: Vec<Arc<Session>> = {
-            self.sessions.iter().map(|r| r.value().clone()).collect()
-        };
+        let sessions: Vec<Arc<Session>> =
+            { self.sessions.iter().map(|r| r.value().clone()).collect() };
 
         for session in sessions {
             if session.is_active().await {
@@ -254,7 +270,7 @@ impl SessionManager {
         self.tee_runtime.shutdown().await?;
 
         // Wipe all session isolation data
-        self.isolation.wipe_all().await;
+        self.pipeline.isolation().wipe_all().await;
 
         tracing::info!("TEE subsystem shutdown complete");
         Ok(())
@@ -272,97 +288,44 @@ impl SessionManager {
 
     /// Get a reference to the session isolation manager
     pub fn isolation(&self) -> &Arc<SessionIsolation> {
-        &self.isolation
+        self.pipeline.isolation()
     }
 
     /// Get a reference to the injection detector
-    pub fn injection_detector(&self) -> &Arc<InjectionDetector> {
-        &self.injection_detector
+    pub fn injection_detector(&self) -> &Arc<crate::guard::InjectionDetector> {
+        self.pipeline.injection_detector()
     }
 
     /// Get a reference to the network firewall
-    pub fn network_firewall(&self) -> &Arc<NetworkFirewall> {
-        &self.network_firewall
+    pub fn network_firewall(&self) -> &Arc<crate::guard::NetworkFirewall> {
+        self.pipeline.network_firewall()
     }
 
     /// Get a reference to the audit event bus
     pub fn audit_bus(&self) -> &Arc<AuditEventBus> {
-        &self.audit_bus
+        self.pipeline.audit_bus()
     }
 
     /// Sanitize AI output for a session, publishing any audit events.
-    ///
-    /// Uses the session's taint registry to scan the output for leaked
-    /// sensitive data and auto-redacts matches.
-    pub async fn sanitize_output(
-        &self,
-        session_id: &str,
-        output: &str,
-    ) -> SanitizeResult {
-        let result = if let Some(guard) = self.isolation.registry(session_id).await {
-            guard.read(|registry| {
-                OutputSanitizer::sanitize(registry, output, session_id)
-            }).await.unwrap_or_else(|| OutputSanitizer::sanitize(
-                &crate::leakage::TaintRegistry::default(),
-                output,
-                session_id,
-            ))
-        } else {
-            OutputSanitizer::sanitize(
-                &crate::leakage::TaintRegistry::default(),
-                output,
-                session_id,
-            )
-        };
-        if !result.audit_events.is_empty() {
-            self.audit_bus.publish_all(result.audit_events.clone()).await;
-        }
-        result
+    pub async fn sanitize_output(&self, session_id: &str, output: &str) -> SanitizeResult {
+        self.pipeline.sanitize_output(session_id, output).await
     }
 
     /// Intercept a tool call for a session, publishing any audit events.
-    ///
-    /// Checks tool arguments for tainted data and dangerous command patterns.
     pub async fn intercept_tool_call(
         &self,
         session_id: &str,
         tool_name: &str,
         arguments: &str,
     ) -> InterceptResult {
-        let result = if let Some(guard) = self.isolation.registry(session_id).await {
-            guard.read(|registry| {
-                ToolInterceptor::intercept(registry, tool_name, arguments, session_id)
-            }).await.unwrap_or_else(|| ToolInterceptor::intercept(
-                &crate::leakage::TaintRegistry::default(),
-                tool_name,
-                arguments,
-                session_id,
-            ))
-        } else {
-            ToolInterceptor::intercept(
-                &crate::leakage::TaintRegistry::default(),
-                tool_name,
-                arguments,
-                session_id,
-            )
-        };
-        if !result.audit_events.is_empty() {
-            self.audit_bus.publish_all(result.audit_events.clone()).await;
-        }
-        result
+        self.pipeline
+            .intercept_tool_call(session_id, tool_name, arguments)
+            .await
     }
 
     /// Check a URL against the network firewall, publishing any audit event.
-    pub async fn check_firewall(
-        &self,
-        url: &str,
-        session_id: &str,
-    ) -> FirewallResult {
-        let result = self.network_firewall.check_url(url, session_id);
-        if let Some(ref event) = result.audit_event {
-            self.audit_bus.publish(event.clone()).await;
-        }
-        result
+    pub async fn check_firewall(&self, url: &str, session_id: &str) -> FirewallResult {
+        self.pipeline.check_firewall(url, session_id).await
     }
 
     /// Create a new session
@@ -394,7 +357,7 @@ impl SessionManager {
         session.set_state(SessionState::Active).await;
 
         // Initialize per-session isolation (taint registry + audit log)
-        self.isolation.init_session(&session.id).await;
+        self.pipeline.isolation().init_session(&session.id).await;
 
         // Store session
         self.sessions.insert(session_id.clone(), session.clone());
@@ -478,22 +441,12 @@ impl SessionManager {
             .ok_or_else(|| Error::Tee(format!("Session {} not found", session_id)))?;
 
         // Prompt injection defense: scan input before processing
-        let injection_result = self.injection_detector.scan(content, session_id);
+        let injection_result = self.pipeline.check_injection(content, session_id).await;
         if injection_result.verdict == InjectionVerdict::Blocked {
-            self.audit_bus
-                .publish_all(injection_result.audit_events)
-                .await;
             return Err(Error::Tee(format!(
                 "Prompt injection blocked: {} pattern(s) detected",
                 injection_result.matches.len()
             )));
-        }
-
-        // Record suspicious patterns (warn but allow)
-        if injection_result.verdict == InjectionVerdict::Suspicious {
-            self.audit_bus
-                .publish_all(injection_result.audit_events)
-                .await;
         }
 
         if !self.tee_runtime.is_tee_active() {
@@ -530,7 +483,7 @@ impl SessionManager {
         self.user_sessions.remove(&user_key);
 
         // Securely wipe session-scoped taint data and audit log
-        let wipe = self.isolation.wipe_session(session_id).await;
+        let wipe = self.pipeline.isolation().wipe_session(session_id).await;
         if !wipe.verified {
             tracing::error!(session_id = session_id, "Session wipe verification failed");
         }
@@ -561,9 +514,8 @@ impl SessionManager {
     /// Clean up inactive sessions
     pub async fn cleanup_inactive(&self, max_idle_ms: i64) -> Result<usize> {
         let now = chrono::Utc::now().timestamp_millis();
-        let sessions: Vec<Arc<Session>> = {
-            self.sessions.iter().map(|r| r.value().clone()).collect()
-        };
+        let sessions: Vec<Arc<Session>> =
+            { self.sessions.iter().map(|r| r.value().clone()).collect() };
 
         let mut cleaned = 0;
         for session in sessions {
@@ -587,7 +539,7 @@ impl SessionManager {
 
 impl Default for SessionManager {
     fn default() -> Self {
-        let global_log = Arc::new(RwLock::new(crate::leakage::AuditLog::default()));
+        let global_log = Arc::new(RwLock::new(crate::audit::AuditLog::default()));
         let bus = Arc::new(AuditEventBus::new(256, global_log));
         Self::new(TeeConfig::default(), bus)
     }
@@ -596,7 +548,7 @@ impl Default for SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::leakage::AuditLog;
+    use crate::audit::AuditLog;
 
     /// Create a default bus for tests.
     fn test_bus() -> Arc<AuditEventBus> {
@@ -796,7 +748,7 @@ mod tests {
         if let Some(guard) = manager.isolation().registry(&session.id).await {
             guard
                 .write(|registry| {
-                    registry.register("sk-secret-key-123", crate::leakage::TaintType::ApiKey);
+                    registry.register("sk-secret-key-123", crate::guard::TaintType::ApiKey);
                 })
                 .await;
         }
@@ -827,7 +779,7 @@ mod tests {
         if let Some(guard) = manager.isolation().registry(&session.id).await {
             guard
                 .write(|registry| {
-                    registry.register("my-secret-password", crate::leakage::TaintType::Password);
+                    registry.register("my-secret-password", crate::guard::TaintType::Password);
                 })
                 .await;
         }
@@ -863,10 +815,7 @@ mod tests {
             .await;
 
         // Should be blocked
-        assert_ne!(
-            result.decision,
-            crate::leakage::FirewallDecision::Allow
-        );
+        assert_ne!(result.decision, crate::guard::FirewallDecision::Allow);
 
         // If blocked, an audit event should have been published
         if result.audit_event.is_some() {
@@ -914,10 +863,7 @@ mod tests {
 
         let result = manager.upgrade_to_tee(&session.id).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("need TeeHardware"));
+        assert!(result.unwrap_err().to_string().contains("need TeeHardware"));
     }
 
     #[tokio::test]
@@ -936,14 +882,9 @@ mod tests {
             .await
             .unwrap();
 
-        let result = manager
-            .process_in_tee(&session.id, "hello from TEE")
-            .await;
+        let result = manager.process_in_tee(&session.id, "hello from TEE").await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not active"));
+        assert!(result.unwrap_err().to_string().contains("not active"));
     }
 
     #[tokio::test]
@@ -998,7 +939,7 @@ mod tests {
         if let Some(guard) = manager.isolation().registry(&session_id).await {
             guard
                 .write(|registry| {
-                    registry.register("secret-data", crate::leakage::TaintType::ApiKey);
+                    registry.register("secret-data", crate::guard::TaintType::ApiKey);
                 })
                 .await;
         }

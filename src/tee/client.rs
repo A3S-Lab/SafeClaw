@@ -3,7 +3,7 @@
 use super::protocol::{TeeMessage, TeeRequest, TeeRequestType, TeeResponse, TeeResponseStatus};
 use crate::config::TeeConfig;
 use crate::error::{Error, Result};
-use a3s_transport::{Frame, Transport};
+use a3s_common::{Frame, Transport};
 use tokio::sync::RwLock;
 
 /// Client for communicating with TEE environment
@@ -119,7 +119,9 @@ impl TeeClient {
                 "TEE returned error: {} (code: {})",
                 message, code
             ))),
-            _ => Err(Error::Tee("Unexpected message type in response".to_string())),
+            _ => Err(Error::Tee(
+                "Unexpected message type in response".to_string(),
+            )),
         }
     }
 
@@ -260,7 +262,7 @@ impl TeeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a3s_transport::MockTransport;
+    use a3s_common::MockTransport;
 
     fn create_test_client() -> TeeClient {
         let config = TeeConfig::default();
@@ -375,7 +377,9 @@ mod tests {
     async fn test_store_and_retrieve_secret() {
         let config = TeeConfig::default();
         let transport = Box::new(MockTransport::with_handler(|data| {
-            let (frame, _) = Frame::decode(data).expect("Failed to decode frame").unwrap();
+            let (frame, _) = Frame::decode(data)
+                .expect("Failed to decode frame")
+                .unwrap();
             let message: TeeMessage =
                 serde_json::from_slice(&frame.payload).expect("Failed to parse request");
 

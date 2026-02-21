@@ -3,8 +3,8 @@
 //! Re-exports shared protocol types from a3s-transport and defines
 //! SafeClaw-specific payload structures.
 
-// Re-export shared protocol types from a3s-transport
-pub use a3s_transport::{TeeMessage, TeeRequest, TeeRequestType, TeeResponse, TeeResponseStatus};
+// Re-export shared protocol types from a3s-common (transport module)
+pub use a3s_common::{TeeMessage, TeeRequest, TeeRequestType, TeeResponse, TeeResponseStatus};
 
 use serde::{Deserialize, Serialize};
 

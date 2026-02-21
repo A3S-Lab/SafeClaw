@@ -6,23 +6,18 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use safeclaw::{
-    agent::{agent_router, AgentEngine, AgentSessionStore, AgentState},
+    agent::{AgentBus, AgentEngine, AgentSessionStore, AgentState},
+    api::build_app,
+    audit::AuditState,
     config::{
-        resolve_api_keys_from_env, ChannelsConfig, DingTalkConfig, DiscordConfig, FeishuConfig,
-        GatewayConfig, ModelProviderConfig, ModelsConfig, SafeClawConfig, SlackConfig, TeeBackend,
-        TeeConfig, TelegramConfig, WeComConfig, WebChatConfig,
+        ChannelsConfig, DingTalkConfig, DiscordConfig, FeishuConfig, SafeClawConfig, ServerConfig,
+        SlackConfig, TeeBackend, TeeConfig, TelegramConfig, WeComConfig, WebChatConfig,
     },
-    events::{events_router, EventStore, EventsState},
-    gateway::GatewayBuilder,
-    leakage::{audit_router, AuditState},
-    personas::{personas_router, PersonaStore, PersonasState},
-    scheduler::{scheduler_router, SchedulerState, TaskScheduler},
-    settings::{settings_router, SettingsState},
+    privacy::handler::PrivacyState,
+    runtime::RuntimeBuilder,
 };
-use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -31,7 +26,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(version)]
 #[command(about = "Secure Personal AI Assistant with TEE Support")]
 struct Cli {
-    /// Configuration file path (supports .toml and .hcl)
+    /// Configuration file path (.hcl)
     #[arg(short, long, env = "SAFECLAW_CONFIG")]
     config: Option<PathBuf>,
 
@@ -76,7 +71,7 @@ enum Commands {
     },
 
     /// Generate a3s-gateway routing configuration for SafeClaw
-    GatewayConfig {
+    ServerConfig {
         /// Output file path (stdout if not specified)
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
@@ -122,6 +117,23 @@ enum Commands {
     Update,
 }
 
+/// Walk up from the current directory looking for `.a3s/config.hcl`.
+///
+/// This mirrors how `git` finds `.git` — works regardless of which
+/// subdirectory the binary is run from inside the monorepo.
+fn find_a3s_config() -> Option<std::path::PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let candidate = dir.join(".a3s/config.hcl");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -142,15 +154,56 @@ async fn main() -> Result<()> {
         .init();
 
     // Load configuration
-    let config = if let Some(config_path) = cli.config {
-        let content = std::fs::read_to_string(&config_path)?;
-        match config_path.extension().and_then(|ext| ext.to_str()) {
-            Some("hcl") => hcl::from_str(&content)?,
-            _ => toml::from_str(&content)?,
+    // Priority: -c flag > ./safeclaw.hcl > <ancestor>/.a3s/config.hcl > ~/.config/safeclaw/config.hcl > default
+    // Model config (.a3s/config.hcl) is always merged in if the primary config has no providers.
+    let (mut config, config_path): (SafeClawConfig, Option<std::path::PathBuf>) =
+        if let Some(config_path) = cli.config {
+            let content = std::fs::read_to_string(&config_path)?;
+            tracing::info!("Loading config from {}", config_path.display());
+            (SafeClawConfig::from_hcl(&content)?, Some(config_path))
+        } else if std::path::Path::new("safeclaw.hcl").exists() {
+            let content = std::fs::read_to_string("safeclaw.hcl")?;
+            tracing::info!("Loading config from ./safeclaw.hcl");
+            (
+                SafeClawConfig::from_hcl(&content)?,
+                Some(std::path::PathBuf::from("safeclaw.hcl")),
+            )
+        } else if let Some(a3s_config) = find_a3s_config() {
+            let content = std::fs::read_to_string(&a3s_config)?;
+            tracing::info!("Loading config from {}", a3s_config.display());
+            let code_config = a3s_code::config::CodeConfig::from_hcl(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", a3s_config.display(), e))?;
+            let mut sc = SafeClawConfig::default();
+            sc.models = code_config;
+            (sc, Some(a3s_config))
+        } else if let Some(config_dir) = dirs::config_dir() {
+            let hcl_path = config_dir.join("safeclaw/config.hcl");
+            if hcl_path.exists() {
+                let content = std::fs::read_to_string(&hcl_path)?;
+                tracing::info!("Loading config from {}", hcl_path.display());
+                (SafeClawConfig::from_hcl(&content)?, Some(hcl_path))
+            } else {
+                (SafeClawConfig::default(), None)
+            }
+        } else {
+            (SafeClawConfig::default(), None)
+        };
+
+    // If the primary config has no model providers, merge in .a3s/config.hcl model config.
+    // This allows safeclaw.local.hcl to handle gateway/channels while .a3s/config.hcl
+    // handles LLM providers — the two files complement each other.
+    if config.models.providers.is_empty() {
+        if let Some(a3s_config) = find_a3s_config() {
+            if let Ok(content) = std::fs::read_to_string(&a3s_config) {
+                if let Ok(code_config) = a3s_code::config::CodeConfig::from_hcl(&content) {
+                    if !code_config.providers.is_empty() {
+                        tracing::info!("Merging model config from {}", a3s_config.display());
+                        config.models = code_config;
+                    }
+                }
+            }
         }
-    } else {
-        SafeClawConfig::default()
-    };
+    }
 
     match cli.command {
         Commands::Update => {
@@ -164,12 +217,12 @@ async fn main() -> Result<()> {
             .await;
         }
         Commands::Gateway { host, port, no_tee } => {
-            run_gateway(config, host, port, !no_tee).await?;
+            run_gateway(config, config_path, host, port, !no_tee).await?;
         }
         Commands::Serve { host, port, no_tee } => {
-            run_serve(config, host, port, !no_tee).await?;
+            run_serve(config, config_path, host, port, !no_tee).await?;
         }
-        Commands::GatewayConfig { output } => {
+        Commands::ServerConfig { output } => {
             generate_gateway_config(&config, output.as_deref())?;
         }
         Commands::Onboard { install_daemon } => {
@@ -194,59 +247,74 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build the shared settings state used by the settings HTTP router.
-fn build_settings_state(config: &SafeClawConfig, models: &ModelsConfig) -> SettingsState {
-    let resolved_keys = resolve_api_keys_from_env(models);
-    SettingsState {
-        config: std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
-        api_keys: std::sync::Arc::new(tokio::sync::RwLock::new(resolved_keys)),
-        started_at: std::time::Instant::now(),
-    }
-}
-
-/// Build the shared personas state used by the personas HTTP router.
-async fn build_personas_state() -> Result<PersonasState> {
-    let personas_dir = PersonaStore::default_dir();
-    let store = std::sync::Arc::new(
-        PersonaStore::new(personas_dir)
-            .await
-            .context("Failed to create PersonaStore")?,
-    );
-    Ok(PersonasState { store })
-}
-
-/// Build the shared events state used by the events HTTP router.
-async fn build_events_state() -> Result<EventsState> {
-    let events_dir = EventStore::default_dir();
-    let store = std::sync::Arc::new(
-        EventStore::new(events_dir)
-            .await
-            .context("Failed to create EventStore")?,
-    );
-    Ok(EventsState { store })
-}
-
 /// Build the shared agent state used by the agent HTTP/WS router.
 ///
 /// Creates an `AgentEngine` that wraps a3s-code's `SessionManager` in-process,
 /// replacing the previous CLI subprocess architecture.
-async fn build_agent_state(models: ModelsConfig) -> Result<AgentState> {
-    let resolved_keys = resolve_api_keys_from_env(&models);
+async fn build_agent_state(
+    mut code_config: a3s_code::config::CodeConfig,
+    skills_config: safeclaw::config::SkillsConfig,
+    memory_store: std::sync::Arc<dyn a3s_memory::MemoryStore>,
+) -> Result<AgentState> {
     let sessions_dir = AgentSessionStore::default_dir();
-    let code_config = models.to_code_config(&resolved_keys, Some(sessions_dir.clone()));
+    code_config.sessions_dir = Some(sessions_dir.clone());
 
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
         .to_string_lossy()
         .to_string();
-    let tool_executor = std::sync::Arc::new(a3s_code::tools::ToolExecutor::new(
-        cwd,
-    ));
+    let tool_executor = std::sync::Arc::new(a3s_code::tools::ToolExecutor::new(cwd));
+
+    // Build default LLM client from config (None if no providers configured — that's OK)
+    let default_llm = code_config
+        .default_llm_config()
+        .map(|llm_cfg| a3s_code::llm::create_client_with_config(llm_cfg));
+
+    if default_llm.is_some() {
+        tracing::info!(
+            model = code_config.default_model.as_deref().unwrap_or("unknown"),
+            "Default LLM client initialized from config"
+        );
+    } else {
+        tracing::info!("No LLM config found — LLM can be configured via PUT /api/agent/config");
+    }
+
+    // Initialize skill registry
+    let skill_registry = std::sync::Arc::new(a3s_code::skills::SkillRegistry::with_builtins());
+    let skills_dir = std::path::PathBuf::from(&skills_config.dir);
+    if skills_config.auto_load {
+        match skill_registry.load_from_dir(&skills_dir) {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(count, dir = %skills_dir.display(), "Loaded skills from directory");
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Skills directory not loaded: {}", e);
+            }
+        }
+    }
+    tracing::info!(count = skill_registry.len(), "Skill registry initialized");
+
     let session_manager = std::sync::Arc::new(
-        a3s_code::session::SessionManager::with_persistence(None, tool_executor, &sessions_dir)
-            .await
-            .context("Failed to create SessionManager")?,
+        a3s_code::session::SessionManager::with_persistence(
+            default_llm,
+            tool_executor,
+            &sessions_dir,
+        )
+        .await
+        .context("Failed to create SessionManager")?,
     );
+
+    // Wire skill registry + manage_skill tool into session manager
+    session_manager
+        .set_skill_registry(skill_registry, skills_dir)
+        .await;
+
+    // Wire shared memory store so agent's remember_success/remember_failure
+    // writes are immediately visible in the UI memory browser
+    session_manager.set_memory_store(memory_store).await;
+
     let store = std::sync::Arc::new(AgentSessionStore::new(sessions_dir.join("ui-state")));
     let engine = std::sync::Arc::new(
         AgentEngine::new(session_manager, code_config, store)
@@ -254,45 +322,34 @@ async fn build_agent_state(models: ModelsConfig) -> Result<AgentState> {
             .map_err(|e| anyhow::anyhow!("Failed to create AgentEngine: {}", e))?,
     );
 
-    Ok(AgentState { engine, models })
-}
-
-/// Build the proactive task scheduler.
-///
-/// Currently creates a scheduler with no channel adapters wired (channel
-/// delivery requires a running gateway with active adapters). Tasks still
-/// execute via the agent engine; results are logged. Channel delivery will
-/// be connected when the gateway exposes its adapter registry.
-async fn build_scheduler(
-    engine: std::sync::Arc<safeclaw::agent::AgentEngine>,
-    config: safeclaw::config::SchedulerConfig,
-) -> Result<TaskScheduler> {
-    let workspace = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
-        .join(".safeclaw-scheduler");
-    std::fs::create_dir_all(&workspace).context("Failed to create scheduler workspace")?;
-
-    // Channel adapters will be wired when gateway exposes its adapter map.
-    // For now, results are delivered via the cron event log.
-    let channels = HashMap::new();
-
-    TaskScheduler::new(engine, channels, config, &workspace.to_string_lossy())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create TaskScheduler: {}", e))
+    Ok(AgentState { engine })
 }
 
 async fn run_gateway(
     config: SafeClawConfig,
+    config_path: Option<std::path::PathBuf>,
     host: String,
     port: u16,
     tee_enabled: bool,
 ) -> Result<()> {
-    tracing::info!("Starting SafeClaw Gateway");
+    tracing::info!("Starting SafeClaw runtime");
 
     let models = config.models.clone();
-    let settings_config = config.clone();
+    let skills_config = config.skills.clone();
 
-    let gateway = GatewayBuilder::new()
+    // Initialize shared memory store early — shared between agent runtime and API layer
+    let memory_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("safeclaw")
+        .join("memory");
+    let memory_store: std::sync::Arc<dyn a3s_memory::MemoryStore> = std::sync::Arc::new(
+        a3s_memory::FileMemoryStore::new(memory_dir.clone())
+            .await
+            .context("Failed to initialize memory store")?,
+    );
+    tracing::info!(dir = %memory_dir.display(), "Memory store initialized");
+
+    let gateway = RuntimeBuilder::new()
         .config(config)
         .host(&host)
         .port(port)
@@ -300,12 +357,25 @@ async fn run_gateway(
         .build()?;
 
     // Build agent state and wire engine into gateway before start
-    let agent_state = build_agent_state(models.clone()).await?;
-    gateway
-        .set_agent_engine(agent_state.engine.clone())
-        .await;
+    let agent_state = build_agent_state(models.clone(), skills_config, memory_store.clone()).await?;
+    if let Some(path) = config_path {
+        agent_state.engine.set_config_path(path).await;
+    }
+    gateway.set_agent_engine(agent_state.engine.clone()).await;
+
+    // Wire agent bus (in-memory by default; NATS if event bridge is configured)
+    {
+        let provider = a3s_event::MemoryProvider::default();
+        let event_bus = std::sync::Arc::new(a3s_event::EventBus::new(provider));
+        let agent_bus = std::sync::Arc::new(AgentBus::new(agent_state.engine.clone(), event_bus));
+        agent_state.engine.set_bus(agent_bus.clone()).await;
+        agent_bus.start();
+        tracing::info!("AgentBus started (in-memory provider)");
+    }
 
     gateway.start().await?;
+
+    let gateway = std::sync::Arc::new(gateway);
 
     // Build audit state from gateway's shared log and alert monitor
     let audit_state = AuditState {
@@ -314,46 +384,39 @@ async fn run_gateway(
         persistence: None,
     };
 
-    // Build remaining routers with CORS for cross-origin UI access
-    let events_state = build_events_state().await?;
-    let settings_state = build_settings_state(&settings_config, &models);
-    let personas_state = build_personas_state().await?;
-
-    // Build scheduler if enabled
-    let scheduler_router_opt = if settings_config.scheduler.enabled {
-        let scheduler = build_scheduler(
-            agent_state.engine.clone(),
-            settings_config.scheduler.clone(),
-        )
-        .await?;
-        scheduler.start().await.context("Failed to start scheduler")?;
-        let sched_state = SchedulerState {
-            scheduler: std::sync::Arc::new(scheduler),
-        };
-        Some(scheduler_router(sched_state))
-    } else {
-        None
+    let privacy_state = PrivacyState {
+        classifier: std::sync::Arc::new(
+            safeclaw::privacy::classifier::Classifier::new(
+                safeclaw::config::default_classification_rules(),
+                safeclaw::config::SensitivityLevel::Normal,
+            )
+            .expect("default classifier"),
+        ),
+        semantic: std::sync::Arc::new(safeclaw::privacy::semantic::SemanticAnalyzer::new()),
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-    let mut app = agent_router(agent_state)
-        .merge(events_router(events_state))
-        .merge(settings_router(settings_state))
-        .merge(personas_router(personas_state))
-        .merge(audit_router(audit_state));
-    if let Some(sched_router) = scheduler_router_opt {
-        app = app.merge(sched_router);
-    }
-    let app = app.layer(cors);
+    // Initialize per-channel agent config store
+    let channel_config_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("safeclaw");
+    let channel_config_store =
+        safeclaw::config::ChannelAgentConfigStore::new(channel_config_dir).await;
+
+    let app = build_app(
+        gateway.clone(),
+        agent_state,
+        privacy_state,
+        audit_state,
+        memory_store.clone(),
+        channel_config_store,
+        &[],
+    );
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
         .parse()
         .context("Invalid listen address")?;
 
-    tracing::info!(%addr, "SafeClaw Gateway listening");
+    tracing::info!(%addr, "SafeClaw runtime listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -375,6 +438,7 @@ async fn run_gateway(
 
 async fn run_serve(
     mut config: SafeClawConfig,
+    config_path: Option<std::path::PathBuf>,
     host: String,
     port: u16,
     tee_enabled: bool,
@@ -384,8 +448,20 @@ async fn run_serve(
 
     tracing::info!("Starting SafeClaw in backend service mode (behind a3s-gateway)");
 
+    // Initialize shared memory store early — shared between agent runtime and API layer
+    let memory_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("safeclaw")
+        .join("memory");
+    let memory_store: std::sync::Arc<dyn a3s_memory::MemoryStore> = std::sync::Arc::new(
+        a3s_memory::FileMemoryStore::new(memory_dir.clone())
+            .await
+            .context("Failed to initialize memory store")?,
+    );
+    tracing::info!(dir = %memory_dir.display(), "Memory store initialized");
+
     let gateway = std::sync::Arc::new(
-        GatewayBuilder::new()
+        RuntimeBuilder::new()
             .config(config.clone())
             .host(&host)
             .port(port)
@@ -394,10 +470,11 @@ async fn run_serve(
     );
 
     // Build agent state and wire engine into gateway before start
-    let agent_state = build_agent_state(config.models.clone()).await?;
-    gateway
-        .set_agent_engine(agent_state.engine.clone())
-        .await;
+    let agent_state = build_agent_state(config.models.clone(), config.skills.clone(), memory_store.clone()).await?;
+    if let Some(path) = config_path {
+        agent_state.engine.set_config_path(path).await;
+    }
+    gateway.set_agent_engine(agent_state.engine.clone()).await;
 
     gateway.start().await?;
 
@@ -407,40 +484,33 @@ async fn run_serve(
         alert_monitor: Some(gateway.alert_monitor().clone()),
         persistence: None,
     };
-    let events_state = build_events_state().await?;
-    let settings_state = build_settings_state(&config, &config.models);
-    let personas_state = build_personas_state().await?;
-
-    // Build scheduler if enabled
-    let scheduler_router_opt = if config.scheduler.enabled {
-        let scheduler = build_scheduler(
-            agent_state.engine.clone(),
-            config.scheduler.clone(),
-        )
-        .await?;
-        scheduler.start().await.context("Failed to start scheduler")?;
-        let sched_state = SchedulerState {
-            scheduler: std::sync::Arc::new(scheduler),
-        };
-        Some(scheduler_router(sched_state))
-    } else {
-        None
+    let privacy_state = PrivacyState {
+        classifier: std::sync::Arc::new(
+            safeclaw::privacy::classifier::Classifier::new(
+                safeclaw::config::default_classification_rules(),
+                safeclaw::config::SensitivityLevel::Normal,
+            )
+            .expect("default classifier"),
+        ),
+        semantic: std::sync::Arc::new(safeclaw::privacy::semantic::SemanticAnalyzer::new()),
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-    let mut app = safeclaw::gateway::ApiHandler::router(gateway.clone())
-        .merge(agent_router(agent_state))
-        .merge(events_router(events_state))
-        .merge(settings_router(settings_state))
-        .merge(personas_router(personas_state))
-        .merge(audit_router(audit_state));
-    if let Some(sched_router) = scheduler_router_opt {
-        app = app.merge(sched_router);
-    }
-    let app = app.layer(cors);
+    // Initialize per-channel agent config store
+    let channel_config_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("safeclaw");
+    let channel_config_store =
+        safeclaw::config::ChannelAgentConfigStore::new(channel_config_dir).await;
+
+    let app = build_app(
+        gateway.clone(),
+        agent_state,
+        privacy_state,
+        audit_state,
+        memory_store.clone(),
+        channel_config_store,
+        &[],
+    );
 
     let addr: std::net::SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -466,14 +536,14 @@ async fn run_serve(
 }
 
 // ---------------------------------------------------------------------------
-// generate_gateway_config — output a3s-gateway TOML for SafeClaw
+// generate_gateway_config — output a3s-gateway config for SafeClaw
 // ---------------------------------------------------------------------------
 
 fn generate_gateway_config(
     _config: &SafeClawConfig,
     output: Option<&std::path::Path>,
 ) -> Result<()> {
-    let descriptor = safeclaw::gateway::build_service_descriptor();
+    let descriptor = safeclaw::runtime::build_service_descriptor();
     let json = serde_json::to_string_pretty(&descriptor)
         .context("Failed to serialize service descriptor")?;
 
@@ -650,7 +720,7 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
 
     // Telegram
     if prompt_yes_no("Enable Telegram?", false) {
-        let bot_token_ref = prompt_input("  Telegram bot_token_ref", "telegram_bot_token");
+        let bot_token = prompt_input("  Telegram bot_token", "telegram_bot_token");
         let users_str = prompt_input(
             "  Allowed user IDs (comma-separated, or empty for none)",
             "",
@@ -660,7 +730,7 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
             .filter_map(|s| s.trim().parse().ok())
             .collect();
         channels.telegram = Some(TelegramConfig {
-            bot_token_ref,
+            bot_token,
             allowed_users,
             dm_policy: "pairing".to_string(),
         });
@@ -668,11 +738,11 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
 
     // Slack
     if prompt_yes_no("Enable Slack?", false) {
-        let bot_token_ref = prompt_input("  Slack bot_token_ref", "slack_bot_token");
-        let app_token_ref = prompt_input("  Slack app_token_ref", "slack_app_token");
+        let bot_token = prompt_input("  Slack bot_token", "slack_bot_token");
+        let app_token = prompt_input("  Slack app_token", "slack_app_token");
         channels.slack = Some(SlackConfig {
-            bot_token_ref,
-            app_token_ref,
+            bot_token,
+            app_token,
             allowed_workspaces: vec![],
             dm_policy: "pairing".to_string(),
         });
@@ -680,9 +750,9 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
 
     // Discord
     if prompt_yes_no("Enable Discord?", false) {
-        let bot_token_ref = prompt_input("  Discord bot_token_ref", "discord_bot_token");
+        let bot_token = prompt_input("  Discord bot_token", "discord_bot_token");
         channels.discord = Some(DiscordConfig {
-            bot_token_ref,
+            bot_token,
             allowed_guilds: vec![],
             dm_policy: "pairing".to_string(),
         });
@@ -696,12 +766,12 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
     // Feishu
     if prompt_yes_no("Enable Feishu?", false) {
         let app_id = prompt_input("  Feishu app_id", "");
-        let app_secret_ref = prompt_input("  Feishu app_secret_ref", "feishu_app_secret");
+        let app_secret = prompt_input("  Feishu app_secret", "feishu_app_secret");
         channels.feishu = Some(FeishuConfig {
             app_id,
-            app_secret_ref,
-            encrypt_key_ref: String::new(),
-            verification_token_ref: String::new(),
+            app_secret,
+            encrypt_key: String::new(),
+            verification_token: String::new(),
             allowed_users: vec![],
             dm_policy: "pairing".to_string(),
         });
@@ -709,12 +779,12 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
 
     // DingTalk
     if prompt_yes_no("Enable DingTalk?", false) {
-        let app_key_ref = prompt_input("  DingTalk app_key_ref", "dingtalk_app_key");
-        let app_secret_ref = prompt_input("  DingTalk app_secret_ref", "dingtalk_app_secret");
+        let app_key = prompt_input("  DingTalk app_key", "dingtalk_app_key");
+        let app_secret = prompt_input("  DingTalk app_secret", "dingtalk_app_secret");
         let robot_code = prompt_input("  DingTalk robot_code", "");
         channels.dingtalk = Some(DingTalkConfig {
-            app_key_ref,
-            app_secret_ref,
+            app_key,
+            app_secret,
             robot_code,
             allowed_users: vec![],
             dm_policy: "pairing".to_string(),
@@ -727,13 +797,13 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
         let agent_id: u32 = prompt_input("  WeCom agent_id", "1000001")
             .parse()
             .unwrap_or(1000001);
-        let secret_ref = prompt_input("  WeCom secret_ref", "wecom_secret");
+        let secret = prompt_input("  WeCom secret", "wecom_secret");
         channels.wecom = Some(WeComConfig {
             corp_id,
             agent_id,
-            secret_ref,
-            encoding_aes_key_ref: String::new(),
-            token_ref: String::new(),
+            secret,
+            encoding_aes_key: String::new(),
+            token: String::new(),
             allowed_users: vec![],
             dm_policy: "pairing".to_string(),
         });
@@ -743,41 +813,35 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
     // Step 4: AI Model Provider
     println!("--- Step 4: AI Model Provider ---");
     let provider = prompt_input("Default provider (anthropic / openai)", "anthropic");
-    let api_key_ref = prompt_input("API key reference name", &format!("{}_api_key", provider));
+    let api_key = prompt_input("API key", &format!("{}_api_key", provider));
 
-    let mut providers = HashMap::new();
-    providers.insert(
-        provider.clone(),
-        ModelProviderConfig {
-            api_key_ref,
+    let default_model_id = match provider.as_str() {
+        "openai" => "gpt-4o",
+        _ => "claude-sonnet-4-20250514",
+    };
+    let models_config = a3s_code::config::CodeConfig {
+        default_model: Some(format!("{}/{}", provider, default_model_id)),
+        providers: vec![a3s_code::config::ProviderConfig {
+            name: provider.clone(),
+            api_key: Some(api_key),
             base_url: None,
-            default_model: match provider.as_str() {
-                "openai" => "gpt-4o".to_string(),
-                _ => "claude-sonnet-4-20250514".to_string(),
-            },
-            models: match provider.as_str() {
-                "openai" => vec![
-                    "gpt-4o".to_string(),
-                    "gpt-4o-mini".to_string(),
-                    "o1".to_string(),
-                ],
-                _ => vec![
-                    "claude-opus-4-20250514".to_string(),
-                    "claude-sonnet-4-20250514".to_string(),
-                    "claude-haiku-3-5-20241022".to_string(),
-                ],
-            },
-        },
-    );
+            models: vec![serde_json::from_value(serde_json::json!({
+                "id": default_model_id,
+                "name": default_model_id,
+            }))
+            .expect("valid ModelConfig")],
+        }],
+        ..Default::default()
+    };
     println!();
 
     // Step 5: Build and write config
     println!("--- Step 5: Writing Configuration ---");
     let config = SafeClawConfig {
-        gateway: GatewayConfig {
+        gateway: ServerConfig {
             host,
             port,
-            ..GatewayConfig::default()
+            ..ServerConfig::default()
         },
         tee: TeeConfig {
             enabled: tee_enabled,
@@ -787,15 +851,11 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
             ..TeeConfig::default()
         },
         channels,
-        models: ModelsConfig {
-            default_provider: provider,
-            providers,
-        },
+        models: models_config,
         ..Default::default()
     };
 
-    let toml_str =
-        toml::to_string_pretty(&config).context("Failed to serialize configuration to TOML")?;
+    let hcl_str = hcl::to_string(&config).context("Failed to serialize configuration to HCL")?;
 
     let config_dir = dirs::config_dir()
         .context("Could not determine config directory")?
@@ -807,8 +867,8 @@ async fn run_onboard(install_daemon: bool) -> Result<()> {
         )
     })?;
 
-    let config_path = config_dir.join("config.toml");
-    std::fs::write(&config_path, &toml_str)
+    let config_path = config_dir.join("config.hcl");
+    std::fs::write(&config_path, &hcl_str)
         .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
     println!("Configuration written to: {}", config_path.display());
@@ -998,7 +1058,7 @@ async fn run_doctor() -> Result<()> {
     // Check configuration
     println!();
     println!("Checking configuration...");
-    let config_path = dirs::config_dir().map(|p| p.join("safeclaw").join("config.toml"));
+    let config_path = dirs::config_dir().map(|p| p.join("safeclaw").join("config.hcl"));
     if let Some(path) = config_path {
         if path.exists() {
             println!("  Configuration file found: {}", path.display());
@@ -1015,8 +1075,8 @@ async fn run_doctor() -> Result<()> {
 
 fn show_config(config: Option<&SafeClawConfig>) -> Result<()> {
     let config = config.cloned().unwrap_or_default();
-    let toml = toml::to_string_pretty(&config)?;
-    println!("{}", toml);
+    let hcl = hcl::to_string(&config)?;
+    println!("{}", hcl);
     Ok(())
 }
 
@@ -1100,22 +1160,26 @@ mod tests {
     #[test]
     fn test_build_config_from_wizard() {
         // Simulate building config from wizard values
-        let mut providers = HashMap::new();
-        providers.insert(
-            "anthropic".to_string(),
-            ModelProviderConfig {
-                api_key_ref: "my_anthropic_key".to_string(),
+        let models_config = a3s_code::config::CodeConfig {
+            default_model: Some("anthropic/claude-sonnet-4-20250514".to_string()),
+            providers: vec![a3s_code::config::ProviderConfig {
+                name: "anthropic".to_string(),
+                api_key: Some("my_anthropic_key".to_string()),
                 base_url: None,
-                default_model: "claude-sonnet-4-20250514".to_string(),
-                models: vec!["claude-sonnet-4-20250514".to_string()],
-            },
-        );
+                models: vec![serde_json::from_value(serde_json::json!({
+                    "id": "claude-sonnet-4-20250514",
+                    "name": "claude-sonnet-4-20250514",
+                }))
+                .expect("valid ModelConfig")],
+            }],
+            ..Default::default()
+        };
 
         let config = SafeClawConfig {
-            gateway: GatewayConfig {
+            gateway: ServerConfig {
                 host: "0.0.0.0".to_string(),
                 port: 9090,
-                ..GatewayConfig::default()
+                ..ServerConfig::default()
             },
             tee: TeeConfig {
                 enabled: true,
@@ -1126,43 +1190,39 @@ mod tests {
             },
             channels: ChannelsConfig {
                 telegram: Some(TelegramConfig {
-                    bot_token_ref: "my_tg_token".to_string(),
+                    bot_token: "my_tg_token".to_string(),
                     allowed_users: vec![12345],
                     dm_policy: "pairing".to_string(),
                 }),
                 webchat: Some(WebChatConfig::default()),
                 ..Default::default()
             },
-            models: ModelsConfig {
-                default_provider: "anthropic".to_string(),
-                providers,
-            },
+            models: models_config,
             ..Default::default()
         };
 
-        // Verify serialization round-trip
-        let toml_str = toml::to_string_pretty(&config).unwrap();
-        let parsed: SafeClawConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.gateway.host, "0.0.0.0");
+        assert_eq!(config.gateway.port, 9090);
+        assert!(config.tee.enabled);
+        assert_eq!(config.tee.memory_mb, 4096);
+        assert_eq!(config.tee.cpu_cores, 4);
+        assert!(config.channels.telegram.is_some());
+        assert!(config.channels.webchat.is_some());
+        assert!(config.channels.slack.is_none());
+        assert_eq!(
+            config.models.default_model,
+            Some("anthropic/claude-sonnet-4-20250514".to_string())
+        );
 
-        assert_eq!(parsed.gateway.host, "0.0.0.0");
-        assert_eq!(parsed.gateway.port, 9090);
-        assert!(parsed.tee.enabled);
-        assert_eq!(parsed.tee.memory_mb, 4096);
-        assert_eq!(parsed.tee.cpu_cores, 4);
-        assert!(parsed.channels.telegram.is_some());
-        assert!(parsed.channels.webchat.is_some());
-        assert!(parsed.channels.slack.is_none());
-        assert_eq!(parsed.models.default_provider, "anthropic");
-
-        let tg = parsed.channels.telegram.unwrap();
-        assert_eq!(tg.bot_token_ref, "my_tg_token");
+        let tg = config.channels.telegram.unwrap();
+        assert_eq!(tg.bot_token, "my_tg_token");
         assert_eq!(tg.allowed_users, vec![12345]);
     }
 
     #[test]
     fn test_daemon_plist_generation() {
         let config_path =
-            PathBuf::from("/Users/test/Library/Application Support/safeclaw/config.toml");
+            PathBuf::from("/Users/test/Library/Application Support/safeclaw/config.hcl");
         let plist = generate_launchd_plist(&config_path).unwrap();
 
         assert!(plist.contains("<key>Label</key>"));
@@ -1172,14 +1232,14 @@ mod tests {
         assert!(plist.contains("<key>KeepAlive</key>"));
         assert!(plist.contains("--config"));
         assert!(plist.contains("gateway"));
-        assert!(plist.contains("/Users/test/Library/Application Support/safeclaw/config.toml"));
+        assert!(plist.contains("/Users/test/Library/Application Support/safeclaw/config.hcl"));
         assert!(plist.contains("safeclaw.stdout.log"));
         assert!(plist.contains("safeclaw.stderr.log"));
     }
 
     #[test]
     fn test_daemon_systemd_generation() {
-        let config_path = PathBuf::from("/home/test/.config/safeclaw/config.toml");
+        let config_path = PathBuf::from("/home/test/.config/safeclaw/config.hcl");
         let unit = generate_systemd_unit(&config_path).unwrap();
 
         assert!(unit.contains("[Unit]"));
@@ -1189,7 +1249,7 @@ mod tests {
         assert!(unit.contains("Type=simple"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("--config"));
-        assert!(unit.contains("/home/test/.config/safeclaw/config.toml"));
+        assert!(unit.contains("/home/test/.config/safeclaw/config.hcl"));
         assert!(unit.contains("gateway"));
         assert!(unit.contains("WantedBy=default.target"));
     }
@@ -1211,7 +1271,7 @@ mod tests {
             privacy {}
 
             models {
-                default_provider = "anthropic"
+                default_model = "anthropic/claude-sonnet-4-20250514"
             }
 
             storage {}
@@ -1219,7 +1279,10 @@ mod tests {
         let config: SafeClawConfig = hcl::from_str(hcl_str).unwrap();
         assert_eq!(config.gateway.host, "0.0.0.0");
         assert_eq!(config.gateway.port, 9090);
-        assert_eq!(config.models.default_provider, "anthropic");
+        assert_eq!(
+            config.models.default_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-20250514")
+        );
     }
 
     #[test]

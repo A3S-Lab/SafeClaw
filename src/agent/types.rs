@@ -64,6 +64,21 @@ pub enum BrowserIncomingMessage {
     SessionNameUpdate {
         name: String,
     },
+    /// Incoming agent-to-agent message (display notification or auto-execute)
+    AgentMessage {
+        message_id: String,
+        from_session_id: String,
+        topic: String,
+        content: String,
+        auto_execute: bool,
+    },
+    /// Slash command response (e.g. /help, /cost, /tools)
+    CommandResponse {
+        command: String,
+        text: String,
+        /// Whether the command modified session state (e.g. /clear, /compact)
+        state_changed: bool,
+    },
 }
 
 // =============================================================================
@@ -92,6 +107,16 @@ pub enum BrowserOutgoingMessage {
     },
     SetPermissionMode {
         mode: String,
+    },
+    /// Send a message to another agent session via the event bus
+    SendAgentMessage {
+        /// Target: "broadcast:<topic>" or "mention:<session_id>"
+        target: String,
+        content: String,
+    },
+    /// Toggle auto-execute mode for incoming agent messages
+    SetAutoExecute {
+        enabled: bool,
     },
 }
 
@@ -160,6 +185,9 @@ pub struct AgentSessionState {
     pub num_turns: u32,
     pub context_used_percent: f64,
     pub is_compacting: bool,
+    /// Bound persona ID (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
 }
 
 impl AgentSessionState {
@@ -175,6 +203,7 @@ impl AgentSessionState {
             num_turns: 0,
             context_used_percent: 0.0,
             is_compacting: false,
+            persona_id: None,
         }
     }
 }
@@ -194,6 +223,9 @@ pub struct AgentProcessInfo {
     pub cli_session_id: Option<String>,
     pub archived: bool,
     pub name: Option<String>,
+    /// Bound persona ID (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
 }
 
 /// Agent process lifecycle state
@@ -230,6 +262,16 @@ pub struct PersistedAgentSession {
     pub pending_messages: Vec<String>,
     pub pending_permissions: HashMap<String, PermissionRequest>,
     pub archived: bool,
+}
+
+/// Persona info for the personas API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub version: Option<String>,
 }
 
 #[cfg(test)]

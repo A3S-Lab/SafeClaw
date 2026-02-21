@@ -35,20 +35,10 @@ impl WeComAdapter {
         }
     }
 
-    /// Resolve credentials from environment variables
+    /// Resolve credentials from env var or inline value
     fn resolve_credentials(config: &WeComConfig) -> Result<(String, String)> {
-        let secret = std::env::var(&config.secret_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve WeCom secret from env var: {}",
-                config.secret_ref
-            ))
-        })?;
-        let token = std::env::var(&config.token_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve WeCom token from env var: {}",
-                config.token_ref
-            ))
-        })?;
+        let secret = super::resolve_credential(&config.secret)?;
+        let token = super::resolve_credential(&config.token)?;
         Ok((secret, token))
     }
 
@@ -58,7 +48,11 @@ impl WeComAdapter {
             return Ok(token.clone());
         }
 
-        let secret = self.secret.read().await.as_ref()
+        let secret = self
+            .secret
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("WeCom secret not initialized".to_string()))?
             .clone();
 
@@ -98,7 +92,12 @@ impl WeComAdapter {
     }
 
     /// Verify callback URL (sort token, timestamp, nonce; SHA-256 hash; compare with signature)
-    pub fn verify_callback(token: &str, timestamp: &str, nonce: &str, signature: &str) -> Result<()> {
+    pub fn verify_callback(
+        token: &str,
+        timestamp: &str,
+        nonce: &str,
+        signature: &str,
+    ) -> Result<()> {
         let mut parts = [token, timestamp, nonce];
         parts.sort();
         let combined = parts.join("");
@@ -224,7 +223,9 @@ impl ChannelAdapter for WeComAdapter {
             )));
         }
 
-        Ok(result.msgid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
+        Ok(result
+            .msgid
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()))
     }
 
     async fn send_typing(&self, chat_id: &str) -> Result<()> {
@@ -296,9 +297,9 @@ mod tests {
         WeComConfig {
             corp_id: "ww_test_corp".to_string(),
             agent_id: 1000001,
-            secret_ref: "TEST_WECOM_SECRET".to_string(),
-            encoding_aes_key_ref: "TEST_WECOM_AES_KEY".to_string(),
-            token_ref: "TEST_WECOM_TOKEN".to_string(),
+            secret: "TEST_WECOM_SECRET".to_string(),
+            encoding_aes_key: "TEST_WECOM_AES_KEY".to_string(),
+            token: "TEST_WECOM_TOKEN".to_string(),
             allowed_users: vec!["user001".to_string(), "user002".to_string()],
             dm_policy: "pairing".to_string(),
         }
@@ -316,8 +317,8 @@ mod tests {
     #[test]
     fn test_resolve_credentials_missing() {
         let config = WeComConfig {
-            secret_ref: "NONEXISTENT_WC_SECRET".to_string(),
-            token_ref: "NONEXISTENT_WC_TOKEN".to_string(),
+            secret: "".to_string(),
+            token: "".to_string(),
             ..create_test_config()
         };
         let result = WeComAdapter::resolve_credentials(&config);
@@ -424,7 +425,9 @@ mod tests {
 
         adapter.start(tx).await.unwrap();
 
-        let result: Result<()> = adapter.edit_message("user123", "msg123", "new content").await;
+        let result: Result<()> = adapter
+            .edit_message("user123", "msg123", "new content")
+            .await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("not supported"));
     }

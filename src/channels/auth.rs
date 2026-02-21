@@ -32,7 +32,10 @@ pub enum AuthOutcome {
 impl AuthOutcome {
     /// Returns true if the request is authenticated or auth is not applicable.
     pub fn is_allowed(&self) -> bool {
-        matches!(self, AuthOutcome::Authenticated { .. } | AuthOutcome::NotApplicable)
+        matches!(
+            self,
+            AuthOutcome::Authenticated { .. } | AuthOutcome::NotApplicable
+        )
     }
 }
 
@@ -91,20 +94,34 @@ impl ChannelAuth for SlackAuth {
     ) -> AuthOutcome {
         let timestamp = match headers.get("x-slack-request-timestamp") {
             Some(ts) => ts,
-            None => return AuthOutcome::Rejected { reason: "missing x-slack-request-timestamp".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-slack-request-timestamp".into(),
+                }
+            }
         };
         let signature = match headers.get("x-slack-signature") {
             Some(sig) => sig,
-            None => return AuthOutcome::Rejected { reason: "missing x-slack-signature".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-slack-signature".into(),
+                }
+            }
         };
 
         // Replay protection
         let ts: i64 = match timestamp.parse() {
             Ok(v) => v,
-            Err(_) => return AuthOutcome::Rejected { reason: "invalid timestamp format".into() },
+            Err(_) => {
+                return AuthOutcome::Rejected {
+                    reason: "invalid timestamp format".into(),
+                }
+            }
         };
         if (timestamp_now - ts).abs() > self.max_timestamp_age() {
-            return AuthOutcome::Rejected { reason: "request timestamp too old".into() };
+            return AuthOutcome::Rejected {
+                reason: "request timestamp too old".into(),
+            };
         }
 
         // HMAC-SHA256: v0:{timestamp}:{body}
@@ -115,10 +132,14 @@ impl ChannelAuth for SlackAuth {
         let computed = format!("v0={}", hex_encode(mac.as_ref()));
 
         if computed != *signature {
-            return AuthOutcome::Rejected { reason: "invalid signature".into() };
+            return AuthOutcome::Rejected {
+                reason: "invalid signature".into(),
+            };
         }
 
-        AuthOutcome::Authenticated { identity: "slack".into() }
+        AuthOutcome::Authenticated {
+            identity: "slack".into(),
+        }
     }
 
     fn channel_name(&self) -> &str {
@@ -155,25 +176,41 @@ impl ChannelAuth for DiscordAuth {
     ) -> AuthOutcome {
         let signature = match headers.get("x-signature-ed25519") {
             Some(sig) => sig,
-            None => return AuthOutcome::Rejected { reason: "missing x-signature-ed25519".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-signature-ed25519".into(),
+                }
+            }
         };
         let timestamp = match headers.get("x-signature-timestamp") {
             Some(ts) => ts,
-            None => return AuthOutcome::Rejected { reason: "missing x-signature-timestamp".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-signature-timestamp".into(),
+                }
+            }
         };
 
         // Replay protection
         let ts: i64 = match timestamp.parse() {
             Ok(v) => v,
-            Err(_) => return AuthOutcome::Rejected { reason: "invalid timestamp format".into() },
+            Err(_) => {
+                return AuthOutcome::Rejected {
+                    reason: "invalid timestamp format".into(),
+                }
+            }
         };
         if (timestamp_now - ts).abs() > self.max_timestamp_age() {
-            return AuthOutcome::Rejected { reason: "request timestamp too old".into() };
+            return AuthOutcome::Rejected {
+                reason: "request timestamp too old".into(),
+            };
         }
 
         // Validate hex format of signature and public key
         if signature.len() != 128 || self.public_key.len() != 64 {
-            return AuthOutcome::Rejected { reason: "invalid signature or public key length".into() };
+            return AuthOutcome::Rejected {
+                reason: "invalid signature or public key length".into(),
+            };
         }
 
         // Ed25519 verification: message = timestamp + body
@@ -181,7 +218,9 @@ impl ChannelAuth for DiscordAuth {
         // The actual adapter's verify_signature handles the real crypto.
         let _ = body; // used in real verification
 
-        AuthOutcome::Authenticated { identity: "discord".into() }
+        AuthOutcome::Authenticated {
+            identity: "discord".into(),
+        }
     }
 
     fn channel_name(&self) -> &str {
@@ -214,20 +253,34 @@ impl ChannelAuth for DingTalkAuth {
     ) -> AuthOutcome {
         let timestamp = match headers.get("timestamp") {
             Some(ts) => ts,
-            None => return AuthOutcome::Rejected { reason: "missing timestamp header".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing timestamp header".into(),
+                }
+            }
         };
         let signature = match headers.get("sign") {
             Some(sig) => sig,
-            None => return AuthOutcome::Rejected { reason: "missing sign header".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing sign header".into(),
+                }
+            }
         };
 
         // Replay protection
         let ts: i64 = match timestamp.parse::<i64>() {
             Ok(v) => v / 1000, // DingTalk uses milliseconds
-            Err(_) => return AuthOutcome::Rejected { reason: "invalid timestamp format".into() },
+            Err(_) => {
+                return AuthOutcome::Rejected {
+                    reason: "invalid timestamp format".into(),
+                }
+            }
         };
         if (timestamp_now - ts).abs() > self.max_timestamp_age() {
-            return AuthOutcome::Rejected { reason: "request timestamp too old".into() };
+            return AuthOutcome::Rejected {
+                reason: "request timestamp too old".into(),
+            };
         }
 
         // HMAC-SHA256: "{timestamp}\n{secret}"
@@ -238,10 +291,14 @@ impl ChannelAuth for DingTalkAuth {
         let computed = base64::engine::general_purpose::STANDARD.encode(mac.as_ref());
 
         if computed != *signature {
-            return AuthOutcome::Rejected { reason: "invalid signature".into() };
+            return AuthOutcome::Rejected {
+                reason: "invalid signature".into(),
+            };
         }
 
-        AuthOutcome::Authenticated { identity: "dingtalk".into() }
+        AuthOutcome::Authenticated {
+            identity: "dingtalk".into(),
+        }
     }
 
     fn channel_name(&self) -> &str {
@@ -274,24 +331,42 @@ impl ChannelAuth for FeishuAuth {
     ) -> AuthOutcome {
         let timestamp = match headers.get("x-lark-request-timestamp") {
             Some(ts) => ts,
-            None => return AuthOutcome::Rejected { reason: "missing x-lark-request-timestamp".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-lark-request-timestamp".into(),
+                }
+            }
         };
         let nonce = match headers.get("x-lark-request-nonce") {
             Some(n) => n,
-            None => return AuthOutcome::Rejected { reason: "missing x-lark-request-nonce".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-lark-request-nonce".into(),
+                }
+            }
         };
         let signature = match headers.get("x-lark-signature") {
             Some(sig) => sig,
-            None => return AuthOutcome::Rejected { reason: "missing x-lark-signature".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing x-lark-signature".into(),
+                }
+            }
         };
 
         // Replay protection
         let ts: i64 = match timestamp.parse() {
             Ok(v) => v,
-            Err(_) => return AuthOutcome::Rejected { reason: "invalid timestamp format".into() },
+            Err(_) => {
+                return AuthOutcome::Rejected {
+                    reason: "invalid timestamp format".into(),
+                }
+            }
         };
         if (timestamp_now - ts).abs() > self.max_timestamp_age() {
-            return AuthOutcome::Rejected { reason: "request timestamp too old".into() };
+            return AuthOutcome::Rejected {
+                reason: "request timestamp too old".into(),
+            };
         }
 
         // SHA256(timestamp + nonce + encrypt_key + body)
@@ -302,10 +377,14 @@ impl ChannelAuth for FeishuAuth {
         let computed = hex_encode(&hash);
 
         if computed != *signature {
-            return AuthOutcome::Rejected { reason: "invalid signature".into() };
+            return AuthOutcome::Rejected {
+                reason: "invalid signature".into(),
+            };
         }
 
-        AuthOutcome::Authenticated { identity: "feishu".into() }
+        AuthOutcome::Authenticated {
+            identity: "feishu".into(),
+        }
     }
 
     fn channel_name(&self) -> &str {
@@ -338,24 +417,42 @@ impl ChannelAuth for WeComAuth {
     ) -> AuthOutcome {
         let timestamp = match headers.get("timestamp") {
             Some(ts) => ts,
-            None => return AuthOutcome::Rejected { reason: "missing timestamp header".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing timestamp header".into(),
+                }
+            }
         };
         let nonce = match headers.get("nonce") {
             Some(n) => n,
-            None => return AuthOutcome::Rejected { reason: "missing nonce header".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing nonce header".into(),
+                }
+            }
         };
         let signature = match headers.get("msg_signature") {
             Some(sig) => sig,
-            None => return AuthOutcome::Rejected { reason: "missing msg_signature header".into() },
+            None => {
+                return AuthOutcome::Rejected {
+                    reason: "missing msg_signature header".into(),
+                }
+            }
         };
 
         // Replay protection
         let ts: i64 = match timestamp.parse() {
             Ok(v) => v,
-            Err(_) => return AuthOutcome::Rejected { reason: "invalid timestamp format".into() },
+            Err(_) => {
+                return AuthOutcome::Rejected {
+                    reason: "invalid timestamp format".into(),
+                }
+            }
         };
         if (timestamp_now - ts).abs() > self.max_timestamp_age() {
-            return AuthOutcome::Rejected { reason: "request timestamp too old".into() };
+            return AuthOutcome::Rejected {
+                reason: "request timestamp too old".into(),
+            };
         }
 
         // SHA256(sort(token, timestamp, nonce))
@@ -367,10 +464,14 @@ impl ChannelAuth for WeComAuth {
         let computed = hex_encode(&hash);
 
         if computed != *signature {
-            return AuthOutcome::Rejected { reason: "invalid signature".into() };
+            return AuthOutcome::Rejected {
+                reason: "invalid signature".into(),
+            };
         }
 
-        AuthOutcome::Authenticated { identity: "wecom".into() }
+        AuthOutcome::Authenticated {
+            identity: "wecom".into(),
+        }
     }
 
     fn channel_name(&self) -> &str {
@@ -432,7 +533,10 @@ impl AuthMiddleware {
         timestamp_now: i64,
     ) -> Result<AuthOutcome> {
         let auth = self.authenticators.get(channel).ok_or_else(|| {
-            Error::Channel(format!("No authenticator registered for channel: {}", channel))
+            Error::Channel(format!(
+                "No authenticator registered for channel: {}",
+                channel
+            ))
         })?;
         Ok(auth.verify_request(headers, body, timestamp_now))
     }
@@ -458,9 +562,9 @@ fn hex_encode(data: &[u8]) -> String {
 // Axum middleware layer
 // ---------------------------------------------------------------------------
 
-use crate::leakage::audit::{AuditEvent, AuditSeverity, LeakageVector};
-use std::sync::Arc;
+use crate::audit::{AuditEvent, AuditSeverity, LeakageVector};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Shared state for the Axum auth middleware layer.
@@ -527,7 +631,10 @@ impl AuthLayer {
 
         // Check rate limit
         if self.is_rate_limited(channel, now).await {
-            let reason = format!("Channel '{}' rate-limited due to excessive auth failures", channel);
+            let reason = format!(
+                "Channel '{}' rate-limited due to excessive auth failures",
+                channel
+            );
             self.record_audit_event(channel, &reason).await;
             return Err(reason);
         }
@@ -594,10 +701,7 @@ impl AuthLayer {
         }
 
         // Generate audit event
-        let description = format!(
-            "Channel auth failure [{}]: {}",
-            channel, reason
-        );
+        let description = format!("Channel auth failure [{}]: {}", channel, reason);
         self.record_audit_event(channel, &description).await;
     }
 
@@ -610,11 +714,7 @@ impl AuthLayer {
             description.to_string(),
         );
 
-        tracing::warn!(
-            channel = channel,
-            "Auth failure: {}",
-            description
-        );
+        tracing::warn!(channel = channel, "Auth failure: {}", description);
 
         self.inner.pending_events.write().await.push(event);
     }
@@ -625,7 +725,10 @@ mod tests {
     use super::*;
 
     fn headers(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn now() -> i64 {
@@ -636,9 +739,15 @@ mod tests {
 
     #[test]
     fn test_auth_outcome_is_allowed() {
-        assert!(AuthOutcome::Authenticated { identity: "x".into() }.is_allowed());
+        assert!(AuthOutcome::Authenticated {
+            identity: "x".into()
+        }
+        .is_allowed());
         assert!(AuthOutcome::NotApplicable.is_allowed());
-        assert!(!AuthOutcome::Rejected { reason: "bad".into() }.is_allowed());
+        assert!(!AuthOutcome::Rejected {
+            reason: "bad".into()
+        }
+        .is_allowed());
     }
 
     // --- TelegramAuth ---
@@ -722,7 +831,13 @@ mod tests {
 
         // Compute expected signature
         use sha2::{Digest, Sha256};
-        let content = format!("{}{}{}{}", ts, nonce, encrypt_key, String::from_utf8_lossy(body));
+        let content = format!(
+            "{}{}{}{}",
+            ts,
+            nonce,
+            encrypt_key,
+            String::from_utf8_lossy(body)
+        );
         let hash = Sha256::digest(content.as_bytes());
         let expected = hex_encode(&hash);
 
@@ -819,10 +934,7 @@ mod tests {
         use base64::Engine;
         let expected = base64::engine::general_purpose::STANDARD.encode(mac.as_ref());
 
-        let h = headers(&[
-            ("timestamp", &ts_ms),
-            ("sign", &expected),
-        ]);
+        let h = headers(&[("timestamp", &ts_ms), ("sign", &expected)]);
 
         let result = auth.verify_request(&h, b"", now());
         assert!(result.is_allowed());
@@ -832,10 +944,7 @@ mod tests {
     fn test_dingtalk_auth_invalid() {
         let auth = DingTalkAuth::new("secret");
         let ts_ms = (now() * 1000).to_string();
-        let h = headers(&[
-            ("timestamp", &ts_ms),
-            ("sign", "wrong"),
-        ]);
+        let h = headers(&[("timestamp", &ts_ms), ("sign", "wrong")]);
 
         let result = auth.verify_request(&h, b"", now());
         assert!(!result.is_allowed());
@@ -845,10 +954,7 @@ mod tests {
     fn test_dingtalk_auth_old_timestamp() {
         let auth = DingTalkAuth::new("secret");
         let old_ts_ms = ((now() - 400) * 1000).to_string();
-        let h = headers(&[
-            ("timestamp", &old_ts_ms),
-            ("sign", "any"),
-        ]);
+        let h = headers(&[("timestamp", &old_ts_ms), ("sign", "any")]);
 
         let result = auth.verify_request(&h, b"", now());
         assert!(matches!(result, AuthOutcome::Rejected { reason } if reason.contains("too old")));

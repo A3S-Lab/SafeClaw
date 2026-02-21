@@ -11,11 +11,13 @@
 //!                          REST API       └── session_store.rs (UI state persistence)
 //! ```
 
+pub mod bus;
 pub mod engine;
 pub mod handler;
 pub mod session_store;
 pub mod types;
 
+pub use bus::AgentBus;
 pub use engine::AgentEngine;
 pub use handler::{agent_router, AgentState};
 pub use session_store::AgentSessionStore;

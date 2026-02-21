@@ -6,7 +6,6 @@
 
 use crate::agent::engine::AgentEngine;
 use crate::agent::types::*;
-use crate::config::ModelsConfig;
 use crate::error::to_json;
 use axum::{
     extract::{
@@ -15,7 +14,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
@@ -27,7 +26,6 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub struct AgentState {
     pub engine: Arc<AgentEngine>,
-    pub models: ModelsConfig,
 }
 
 /// Create the agent router with all REST and WebSocket endpoints
@@ -41,6 +39,18 @@ pub fn agent_router(state: AgentState) -> Router {
         .route("/api/agent/sessions/:id", delete(delete_session))
         .route("/api/agent/sessions/:id/relaunch", post(relaunch_session))
         .route("/api/agent/backends", get(list_backends))
+        .route("/api/agent/personas", get(list_personas))
+        .route("/api/agent/sessions/:id/message", post(send_agent_message))
+        .route(
+            "/api/agent/sessions/:id/auto-execute",
+            put(set_auto_execute),
+        )
+        .route("/api/agent/sessions/:id/configure", post(configure_session))
+        // Slash commands
+        .route("/api/agent/commands", get(list_commands))
+        // Config endpoints
+        .route("/api/agent/config", get(get_config))
+        .route("/api/agent/config", put(put_config))
         // WebSocket endpoint (browser only — no more CLI subprocess)
         .route("/ws/agent/browser/:id", get(ws_browser_upgrade))
         .with_state(state)
@@ -56,6 +66,15 @@ struct CreateSessionRequest {
     model: Option<String>,
     permission_mode: Option<String>,
     cwd: Option<String>,
+    persona_id: Option<String>,
+    /// API key override for this session's LLM client
+    api_key: Option<String>,
+    /// Base URL override for this session's LLM client
+    base_url: Option<String>,
+    /// System prompt override
+    system_prompt: Option<String>,
+    /// Skills to enable
+    skills: Option<Vec<String>>,
 }
 
 /// Create a new agent session
@@ -72,13 +91,14 @@ async fn create_session(
             request.model,
             request.permission_mode,
             request.cwd,
+            request.persona_id,
+            request.api_key,
+            request.base_url,
+            request.system_prompt,
         )
         .await
     {
-        Ok(info) => (
-            StatusCode::CREATED,
-            Json(to_json(info)),
-        ),
+        Ok(info) => (StatusCode::CREATED, Json(to_json(info))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -179,6 +199,10 @@ async fn relaunch_session(
             existing.model,
             existing.permission_mode,
             Some(existing.cwd),
+            existing.persona_id,
+            None,
+            None,
+            None,
         )
         .await
     {
@@ -223,16 +247,25 @@ fn model_display_name(model_id: &str) -> String {
 
 /// List available model backends from configuration
 async fn list_backends(State(state): State<AgentState>) -> impl IntoResponse {
+    let cfg = state.engine.code_config().await;
+    let default_model = cfg.default_model.as_deref().unwrap_or("");
+    // default_model is "provider/model" format — extract provider portion
+    let default_provider = default_model.split('/').next().unwrap_or("");
+    let default_model_id = default_model.split('/').nth(1).unwrap_or("");
+
     let mut backends = Vec::new();
 
-    for (provider_name, provider_cfg) in &state.models.providers {
-        for model_id in &provider_cfg.models {
-            let is_default = provider_name == &state.models.default_provider
-                && model_id == &provider_cfg.default_model;
+    for provider in &cfg.providers {
+        for model in &provider.models {
+            let is_default = provider.name == default_provider && model.id == default_model_id;
             backends.push(BackendInfo {
-                id: model_id.clone(),
-                name: model_display_name(model_id),
-                provider: provider_name.clone(),
+                id: model.id.clone(),
+                name: if model.name.is_empty() {
+                    model_display_name(&model.id)
+                } else {
+                    model.name.clone()
+                },
+                provider: provider.name.clone(),
                 is_default,
             });
         }
@@ -240,8 +273,8 @@ async fn list_backends(State(state): State<AgentState>) -> impl IntoResponse {
 
     // Sort: default provider first, then alphabetically by provider, then by model id
     backends.sort_by(|a, b| {
-        let a_is_default_provider = a.provider == state.models.default_provider;
-        let b_is_default_provider = b.provider == state.models.default_provider;
+        let a_is_default_provider = a.provider == default_provider;
+        let b_is_default_provider = b.provider == default_provider;
         b_is_default_provider
             .cmp(&a_is_default_provider)
             .then_with(|| a.provider.cmp(&b.provider))
@@ -249,6 +282,264 @@ async fn list_backends(State(state): State<AgentState>) -> impl IntoResponse {
     });
 
     Json(backends)
+}
+
+/// List available personas from the skill registry
+async fn list_personas(State(state): State<AgentState>) -> impl IntoResponse {
+    let personas = state.engine.list_personas().await;
+    Json(personas)
+}
+
+/// GET /api/agent/commands — list available slash commands
+async fn list_commands(State(state): State<AgentState>) -> impl IntoResponse {
+    let commands: Vec<serde_json::Value> = state
+        .engine
+        .list_commands()
+        .into_iter()
+        .map(|(name, desc)| {
+            serde_json::json!({
+                "name": format!("/{}", name),
+                "description": desc,
+            })
+        })
+        .collect();
+    Json(commands)
+}
+
+// =============================================================================
+// Config handlers
+// =============================================================================
+
+/// GET /api/agent/config — return current CodeConfig as JSON
+async fn get_config(State(state): State<AgentState>) -> impl IntoResponse {
+    let cfg = state.engine.code_config().await;
+    Json(serde_json::to_value(&cfg).unwrap_or_default())
+}
+
+/// PUT /api/agent/config request body — partial CodeConfig fields the UI can update
+#[derive(Debug, Deserialize)]
+struct PutConfigRequest {
+    default_model: Option<String>,
+    providers: Option<Vec<serde_json::Value>>,
+}
+
+/// PUT /api/agent/config — update CodeConfig and persist to config file
+async fn put_config(
+    State(state): State<AgentState>,
+    Json(request): Json<PutConfigRequest>,
+) -> impl IntoResponse {
+    // Build updated config from current + patch
+    let mut cfg = state.engine.code_config().await;
+
+    if let Some(default_model) = request.default_model {
+        cfg.default_model = Some(default_model);
+    }
+
+    if let Some(providers_json) = request.providers {
+        match serde_json::from_value::<Vec<a3s_code::config::ProviderConfig>>(
+            serde_json::Value::Array(providers_json),
+        ) {
+            Ok(providers) => cfg.providers = providers,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Invalid providers: {}", e)})),
+                );
+            }
+        }
+    }
+
+    // Persist to config file if path is known
+    if let Some(path) = state.engine.get_config_path().await {
+        persist_code_config_to_file(&cfg, &path);
+    }
+
+    // Hot-reload: updates both in-memory config AND SessionManager's default LLM
+    state.engine.update_code_config(cfg.clone()).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&cfg).unwrap_or_default()),
+    )
+}
+
+/// Persist `CodeConfig` to the config file.
+///
+/// Handles two file formats:
+/// - `.a3s/config.hcl` — a3s-code format (top-level `default_model` + `providers`)
+///   Written by serializing `CodeConfig` directly as JSON (which the HCL loader accepts).
+/// - `safeclaw.hcl` / `config.hcl` — SafeClaw format (`models { ... }` block)
+///   Read existing file, patch the `models` section, write back.
+fn persist_code_config_to_file(cfg: &a3s_code::config::CodeConfig, path: &std::path::Path) {
+    // Detect format by checking if the file contains a top-level `models {` block
+    let is_safeclaw_format = std::fs::read_to_string(path)
+        .map(|content| content.contains("models {") || content.contains("models{"))
+        .unwrap_or(false);
+
+    if is_safeclaw_format {
+        // SafeClaw format: read full config, patch models, write back
+        match std::fs::read_to_string(path) {
+            Ok(existing_hcl) => match crate::config::SafeClawConfig::from_hcl(&existing_hcl) {
+                Ok(mut full_config) => {
+                    full_config.models = cfg.clone();
+                    match hcl::to_string(&full_config) {
+                        Ok(new_hcl) => {
+                            if let Err(e) = std::fs::write(path, &new_hcl) {
+                                tracing::warn!("Failed to write config {}: {}", path.display(), e);
+                            } else {
+                                tracing::info!("Config persisted to {}", path.display());
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed to serialize SafeClawConfig: {}", e),
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to parse existing SafeClawConfig: {}", e),
+            },
+            Err(e) => tracing::warn!("Failed to read config {}: {}", path.display(), e),
+        }
+    } else {
+        // a3s-code format: serialize CodeConfig as JSON directly
+        // CodeConfig::save_to_file writes JSON which CodeConfig::from_file also accepts
+        if let Err(e) = cfg.save_to_file(path) {
+            tracing::warn!("Failed to persist CodeConfig to {}: {}", path.display(), e);
+        } else {
+            tracing::info!("CodeConfig persisted to {}", path.display());
+        }
+    }
+}
+
+/// Send agent message request body
+#[derive(Debug, Deserialize)]
+struct SendAgentMessageRequest {
+    /// "broadcast:<topic>" or "mention:<session_id>"
+    target: String,
+    content: String,
+}
+
+/// Send a message from a session to another agent via the event bus
+async fn send_agent_message(
+    State(state): State<AgentState>,
+    Path(id): Path<String>,
+    Json(request): Json<SendAgentMessageRequest>,
+) -> impl IntoResponse {
+    if state.engine.get_session(&id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        );
+    }
+
+    match state
+        .engine
+        .publish_agent_message(&id, &request.target, &request.content)
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// Set auto-execute request body
+#[derive(Debug, Deserialize)]
+struct SetAutoExecuteRequest {
+    enabled: bool,
+}
+
+/// Toggle auto-execute mode for incoming agent messages on a session
+async fn set_auto_execute(
+    State(state): State<AgentState>,
+    Path(id): Path<String>,
+    Json(request): Json<SetAutoExecuteRequest>,
+) -> impl IntoResponse {
+    if state.engine.get_session(&id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        );
+    }
+
+    state.engine.set_auto_execute(&id, request.enabled).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "auto_execute": request.enabled})),
+    )
+}
+
+/// Configure LLM for an existing session (model + credentials)
+#[derive(Debug, Deserialize)]
+struct ConfigureSessionRequest {
+    model: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+}
+
+async fn configure_session(
+    State(state): State<AgentState>,
+    Path(id): Path<String>,
+    Json(request): Json<ConfigureSessionRequest>,
+) -> impl IntoResponse {
+    if state.engine.get_session(&id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        );
+    }
+
+    let model_id = match request.model.as_deref() {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => state
+            .engine
+            .code_config()
+            .await
+            .default_model
+            .unwrap_or_default(),
+    };
+
+    tracing::info!(
+        session_id = %id,
+        model = %model_id,
+        has_api_key = request.api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+        has_base_url = request.base_url.is_some(),
+        "Configuring session LLM"
+    );
+
+    if model_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No model specified and no default configured"})),
+        );
+    }
+
+    let result = if request.api_key.is_some() || request.base_url.is_some() {
+        state
+            .engine
+            .configure_model_with_credentials_pub(
+                &id,
+                &model_id,
+                request.api_key.as_deref(),
+                request.base_url.as_deref(),
+            )
+            .await
+    } else {
+        state
+            .engine
+            .configure_model_for_session_pub(&id, &model_id)
+            .await
+    };
+
+    match result {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true, "model": model_id})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 // =============================================================================
@@ -367,25 +658,27 @@ mod tests {
     use super::*;
     use crate::agent::engine::AgentEngine;
     use crate::agent::session_store::AgentSessionStore;
-    use crate::config::{resolve_api_keys_from_env, ModelProviderConfig};
-    use std::collections::HashMap;
+    use a3s_code::config::{CodeConfig, ProviderConfig};
     use tempfile::TempDir;
+
+    fn test_model(id: &str) -> a3s_code::config::ModelConfig {
+        serde_json::from_value(serde_json::json!({ "id": id })).unwrap()
+    }
 
     async fn make_state() -> (AgentState, TempDir) {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
 
-        let models = ModelsConfig::default();
-        let keys = resolve_api_keys_from_env(&models);
-        let code_config = models.to_code_config(&keys, Some(dir.path().to_path_buf()));
+        let code_config = CodeConfig {
+            sessions_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         let cwd = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
             .to_string_lossy()
             .to_string();
-        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::new(
-            cwd,
-        ));
+        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::new(cwd));
         let session_manager = Arc::new(
             a3s_code::session::SessionManager::with_persistence(None, tool_executor, dir.path())
                 .await
@@ -398,7 +691,7 @@ mod tests {
                 .unwrap(),
         );
 
-        let state = AgentState { engine, models };
+        let state = AgentState { engine };
         (state, dir)
     }
 
@@ -498,40 +791,42 @@ mod tests {
             .unwrap();
         let backends: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
 
-        // Default ModelsConfig has anthropic (3 models) + openai (3 models) = 6
-        assert_eq!(backends.len(), 6);
-
-        // Verify provider field is present on all entries
-        for b in &backends {
-            assert!(b.get("provider").is_some());
-            assert!(b.get("is_default").is_some());
-        }
-
-        // Verify the default model is marked
-        let defaults: Vec<&serde_json::Value> = backends
-            .iter()
-            .filter(|b| b["is_default"] == true)
-            .collect();
-        assert!(!defaults.is_empty());
+        // Default CodeConfig has no providers, so empty list
+        assert_eq!(backends.len(), 0);
     }
 
     #[tokio::test]
     async fn test_list_backends_custom_config() {
-        let (mut state, _dir) = make_state().await;
-        let mut providers = HashMap::new();
-        providers.insert(
-            "custom".to_string(),
-            ModelProviderConfig {
-                api_key_ref: "key".to_string(),
+        let dir = TempDir::new().unwrap();
+        let code_config = CodeConfig {
+            default_model: Some("custom/my-model-v2".to_string()),
+            providers: vec![ProviderConfig {
+                name: "custom".to_string(),
+                api_key: Some("key".to_string()),
                 base_url: None,
-                default_model: "my-model-v2".to_string(),
-                models: vec!["my-model-v1".to_string(), "my-model-v2".to_string()],
-            },
-        );
-        state.models = ModelsConfig {
-            default_provider: "custom".to_string(),
-            providers,
+                models: vec![test_model("my-model-v1"), test_model("my-model-v2")],
+            }],
+            sessions_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
         };
+
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            .to_string_lossy()
+            .to_string();
+        let tool_executor = Arc::new(a3s_code::tools::ToolExecutor::new(cwd));
+        let session_manager = Arc::new(
+            a3s_code::session::SessionManager::with_persistence(None, tool_executor, dir.path())
+                .await
+                .unwrap(),
+        );
+        let store = Arc::new(AgentSessionStore::new(dir.path().join("ui-state")));
+        let engine = Arc::new(
+            AgentEngine::new(session_manager, code_config, store)
+                .await
+                .unwrap(),
+        );
+        let state = AgentState { engine };
 
         let response = list_backends(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -606,6 +901,11 @@ mod tests {
             model: None,
             permission_mode: None,
             cwd: Some("/tmp".to_string()),
+            persona_id: None,
+            api_key: None,
+            base_url: None,
+            system_prompt: None,
+            skills: None,
         };
         let response = create_session(State(state.clone()), Json(req))
             .await

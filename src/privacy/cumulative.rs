@@ -43,7 +43,10 @@ impl PiiType {
             Self::Address
         } else if lower.contains("name") {
             Self::Name
-        } else if lower.contains("dob") || lower.contains("date_of_birth") || lower.contains("dateofbirth") {
+        } else if lower.contains("dob")
+            || lower.contains("date_of_birth")
+            || lower.contains("dateofbirth")
+        {
             Self::DateOfBirth
         } else if lower.contains("password") {
             Self::Password
@@ -108,11 +111,7 @@ impl SessionPrivacyContext {
     ///
     /// Call this after each message is classified, passing the rule names
     /// and sensitivity level from the classification result.
-    pub fn record_disclosures(
-        &mut self,
-        rule_names: &[String],
-        sensitivity: SensitivityLevel,
-    ) {
+    pub fn record_disclosures(&mut self, rule_names: &[String], sensitivity: SensitivityLevel) {
         self.message_count += 1;
         self.total_matches += rule_names.len();
 
@@ -197,10 +196,7 @@ mod tests {
     #[test]
     fn test_record_single_disclosure() {
         let mut ctx = SessionPrivacyContext::new();
-        ctx.record_disclosures(
-            &["email".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
 
         assert_eq!(ctx.distinct_pii_count(), 1);
         assert!(ctx.disclosed_types().contains(&PiiType::Email));
@@ -214,22 +210,13 @@ mod tests {
         let mut ctx = SessionPrivacyContext::new();
 
         // Message 1: email
-        ctx.record_disclosures(
-            &["email".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
 
         // Message 2: phone
-        ctx.record_disclosures(
-            &["phone".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["phone".to_string()], SensitivityLevel::Sensitive);
 
         // Message 3: address
-        ctx.record_disclosures(
-            &["address".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["address".to_string()], SensitivityLevel::Sensitive);
 
         assert_eq!(ctx.distinct_pii_count(), 3);
         assert_eq!(ctx.total_matches(), 3);
@@ -240,14 +227,8 @@ mod tests {
     fn test_duplicate_type_not_counted_twice() {
         let mut ctx = SessionPrivacyContext::new();
 
-        ctx.record_disclosures(
-            &["email".to_string()],
-            SensitivityLevel::Sensitive,
-        );
-        ctx.record_disclosures(
-            &["email".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
+        ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
 
         // Same PII type, only counted once
         assert_eq!(ctx.distinct_pii_count(), 1);
@@ -259,18 +240,12 @@ mod tests {
     fn test_max_sensitivity_tracks_highest() {
         let mut ctx = SessionPrivacyContext::new();
 
-        ctx.record_disclosures(
-            &["email".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
         ctx.record_disclosures(
             &["credit_card".to_string()],
             SensitivityLevel::HighlySensitive,
         );
-        ctx.record_disclosures(
-            &["phone".to_string()],
-            SensitivityLevel::Sensitive,
-        );
+        ctx.record_disclosures(&["phone".to_string()], SensitivityLevel::Sensitive);
 
         assert_eq!(ctx.max_sensitivity(), SensitivityLevel::HighlySensitive);
     }
@@ -291,7 +266,10 @@ mod tests {
         ctx.record_disclosures(&["address".to_string()], SensitivityLevel::Sensitive);
 
         // 3 types >= warn_threshold(3), < reject_threshold(5)
-        assert_eq!(ctx.assess_risk(3, 5), CumulativeRiskDecision::RequireConfirmation);
+        assert_eq!(
+            ctx.assess_risk(3, 5),
+            CumulativeRiskDecision::RequireConfirmation
+        );
     }
 
     #[test]
@@ -300,7 +278,10 @@ mod tests {
         ctx.record_disclosures(&["email".to_string()], SensitivityLevel::Sensitive);
         ctx.record_disclosures(&["phone".to_string()], SensitivityLevel::Sensitive);
         ctx.record_disclosures(&["address".to_string()], SensitivityLevel::Sensitive);
-        ctx.record_disclosures(&["credit_card".to_string()], SensitivityLevel::HighlySensitive);
+        ctx.record_disclosures(
+            &["credit_card".to_string()],
+            SensitivityLevel::HighlySensitive,
+        );
         ctx.record_disclosures(&["ssn".to_string()], SensitivityLevel::HighlySensitive);
 
         // 5 types >= reject_threshold(5)
@@ -345,6 +326,9 @@ mod tests {
 
         ctx.record_disclosures(&["address".to_string()], SensitivityLevel::Sensitive);
         // Now 3 distinct types — escalate!
-        assert_eq!(ctx.assess_risk(3, 5), CumulativeRiskDecision::RequireConfirmation);
+        assert_eq!(
+            ctx.assess_risk(3, 5),
+            CumulativeRiskDecision::RequireConfirmation
+        );
     }
 }

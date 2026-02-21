@@ -19,18 +19,15 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal A3S crates
-a3s-tools-core = { version = "0.1", path = "../tools-core" }
-a3s-lane = { version = "0.2", path = "../lane" }
-a3s-cron = { version = "0.1", path = "../cron" }
-a3s-code = { version = "0.6", path = "../code/server" }
-a3s-gateway = { version = "0.1", path = "../gateway" }
-a3s-privacy = { version = "0.1", path = "../privacy" }
-a3s-event = { version = "0.1", path = "../event" }
-a3s-transport = { version = "0.1", path = "../transport" }
-a3s-box-core = { version = "0.2", path = "../box/src/core", optional = true }
+a3s-common = { version = "0.1", path = "../common" }
+a3s-code = { version = "0.9", path = "../code/core", package = "a3s-code-core" }
+a3s-memory = { version = "0.1", path = "../memory" }
+a3s-event = { version = "0.3", path = "../event" }
+a3s-box-core = { version = "0.6", path = "../box/src/core", optional = true }
 
 # Home directory resolution for sealed storage
 dirs = "5.0"
+
 
 # Regex for privacy classification
 regex = "1.10"
@@ -51,7 +48,6 @@ prost = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-toml = "0.8"
 hcl-rs = "0.18"
 
 # Error handling
@@ -85,6 +81,8 @@ tokio-tungstenite = "0.21"
 # Cryptography for secure communication
 ring = "0.17"
 aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding"] }
 x25519-dalek = { version = "2.0", features = ["reusable_secrets"] }
 ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 hkdf = "0.12"

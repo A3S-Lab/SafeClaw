@@ -81,45 +81,37 @@
 //!
 //! ## Modules
 //!
-//! - [`gateway`]: Gateway server, a3s-gateway integration, and HTTP API
+//! - [`runtime`]: Runtime orchestrator, a3s-gateway integration, and HTTP API
+//! - [`guard`]: Core protection pipeline (taint, sanitization, interception, firewall)
+//! - [`audit`]: Observability pipeline (audit log, alerting, persistence)
 //! - [`channels`]: Multi-channel message adapters
 //! - [`session`]: Session management and routing
 //! - [`privacy`]: Privacy classification and data protection
 //! - [`tee`]: TEE environment integration with A3S Box
-//! - [`crypto`]: Cryptographic utilities for secure communication
-//! - [`memory`]: Three-layer memory system (Resource → Artifact → Insight)
 //! - [`config`]: Configuration management
 
 pub mod agent;
 pub mod api;
+pub mod audit;
 pub mod channels;
 pub mod config;
-pub mod crypto;
 pub mod error;
-pub mod events;
-pub mod gateway;
+pub mod guard;
 pub mod hardening;
-pub mod leakage;
-pub mod memory;
-pub mod personas;
 pub mod privacy;
-pub mod scheduler;
+pub mod runtime;
 pub mod session;
-pub mod settings;
+pub mod skills;
 pub mod tee;
 
 pub use agent::{agent_router, AgentEngine, AgentSessionStore, AgentState};
 pub use api::build_app;
+pub use audit::{Alert, AlertConfig, AlertKind, AlertMonitor, AuditEventBus, AuditLog, AuditState};
 pub use config::{A3sGatewayConfig, AuditConfig, EventBridgeConfig, SafeClawConfig};
 pub use error::{Error, Result};
-pub use events::{events_router, EventStore, EventsState};
-pub use gateway::{Gateway, GatewayBuilder, GatewayState, ProcessedResponse};
-pub use leakage::{
-    Alert, AlertConfig, AlertKind, AlertMonitor, AuditEventBus, AuditLog, AuditState,
+pub use guard::{
     InjectionDetector, NetworkFirewall, NetworkPolicy, OutputSanitizer, SessionIsolation,
     TaintRegistry, ToolInterceptor,
 };
-pub use personas::{personas_router, PersonaStore, PersonasState};
 pub use privacy::{privacy_router, PrivacyState};
-pub use scheduler::{scheduler_router, SchedulerState, TaskScheduler};
-pub use settings::{settings_router, SettingsState};
+pub use runtime::{ProcessedResponse, Runtime, RuntimeBuilder, RuntimeState};

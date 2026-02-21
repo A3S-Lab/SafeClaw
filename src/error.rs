@@ -25,13 +25,9 @@ pub enum Error {
     #[error("Privacy error: {0}")]
     Privacy(String),
 
-    /// Cryptographic error
-    #[error("Crypto error: {0}")]
-    Crypto(String),
-
-    /// Gateway error
-    #[error("Gateway error: {0}")]
-    Gateway(String),
+    /// Runtime error
+    #[error("Runtime error: {0}")]
+    Runtime(String),
 
     /// IO error
     #[error("IO error: {0}")]
@@ -44,10 +40,6 @@ pub enum Error {
     /// HTTP error
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
-
-    /// Memory error
-    #[error("Memory error: {0}")]
-    Memory(String),
 
     /// Leakage prevention error
     #[error("Leakage error: {0}")]

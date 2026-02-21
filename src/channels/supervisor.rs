@@ -22,10 +22,7 @@ const HEALTHY_THRESHOLD: Duration = Duration::from_secs(120);
 /// The task calls `adapter.start()` in a loop. On failure it waits with
 /// exponential backoff before retrying. A `ChannelEvent::Error` is sent
 /// on each failure so the audit pipeline can record it.
-pub fn spawn_supervised(
-    adapter: Arc<dyn ChannelAdapter>,
-    event_tx: mpsc::Sender<ChannelEvent>,
-) {
+pub fn spawn_supervised(adapter: Arc<dyn ChannelAdapter>, event_tx: mpsc::Sender<ChannelEvent>) {
     let name = adapter.name().to_string();
     tokio::spawn(async move {
         let mut backoff = MIN_BACKOFF;

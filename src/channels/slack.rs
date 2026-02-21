@@ -31,14 +31,9 @@ impl SlackAdapter {
         }
     }
 
-    /// Resolve bot token from environment variable
+    /// Resolve bot token from env var or inline value
     fn resolve_token(token_ref: &str) -> Result<String> {
-        std::env::var(token_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Failed to resolve Slack bot token from env var: {}",
-                token_ref
-            ))
-        })
+        super::resolve_credential(token_ref)
     }
 
     /// Check if a workspace is allowed
@@ -60,9 +55,9 @@ impl SlackAdapter {
         expected: &str,
     ) -> Result<()> {
         // Check timestamp to prevent replay attacks (within 5 minutes)
-        let ts: i64 = timestamp.parse().map_err(|_| {
-            Error::Channel("Invalid timestamp format".to_string())
-        })?;
+        let ts: i64 = timestamp
+            .parse()
+            .map_err(|_| Error::Channel("Invalid timestamp format".to_string()))?;
         let now = chrono::Utc::now().timestamp();
         if (now - ts).abs() > 300 {
             return Err(Error::Channel("Request timestamp too old".to_string()));
@@ -134,7 +129,7 @@ impl ChannelAdapter for SlackAdapter {
         self.base.set_status(AdapterStatus::Starting);
 
         // Resolve token lazily
-        let token = Self::resolve_token(&self.config.bot_token_ref)?;
+        let token = Self::resolve_token(&self.config.bot_token)?;
         *self.bot_token.write().await = Some(token);
 
         *self.event_tx.write().await = Some(event_tx.clone());
@@ -174,7 +169,11 @@ impl ChannelAdapter for SlackAdapter {
             return Err(Error::Channel("Slack adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Slack bot token not initialized".to_string()))?
             .clone();
 
@@ -230,7 +229,11 @@ impl ChannelAdapter for SlackAdapter {
             return Err(Error::Channel("Slack adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Slack bot token not initialized".to_string()))?
             .clone();
 
@@ -278,7 +281,11 @@ impl ChannelAdapter for SlackAdapter {
             return Err(Error::Channel("Slack adapter not running".to_string()));
         }
 
-        let bot_token = self.bot_token.read().await.as_ref()
+        let bot_token = self
+            .bot_token
+            .read()
+            .await
+            .as_ref()
             .ok_or_else(|| Error::Channel("Slack bot token not initialized".to_string()))?
             .clone();
 
@@ -366,8 +373,8 @@ mod tests {
 
     fn create_test_config() -> SlackConfig {
         SlackConfig {
-            bot_token_ref: "TEST_SLACK_BOT_TOKEN".to_string(),
-            app_token_ref: "TEST_SLACK_APP_TOKEN".to_string(),
+            bot_token: "TEST_SLACK_BOT_TOKEN".to_string(),
+            app_token: "TEST_SLACK_APP_TOKEN".to_string(),
             allowed_workspaces: vec!["T01234567".to_string()],
             dm_policy: "pairing".to_string(),
         }
@@ -384,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_resolve_token_missing() {
-        let result = SlackAdapter::resolve_token("NONEXISTENT_SLACK_TOKEN");
+        let result = SlackAdapter::resolve_token("");
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("Failed to resolve"));
@@ -433,7 +440,10 @@ mod tests {
 
         let result = SlackAdapter::verify_signature(signing_secret, &timestamp, body, "v0=wrong");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid signature"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid signature"));
     }
 
     #[test]

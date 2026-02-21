@@ -1,26 +1,14 @@
 //! HTTP handlers for the Privacy API
 //!
-//! Provides REST endpoints for privacy classification, semantic analysis,
-//! and compliance rule management:
+//! Provides REST endpoints for privacy classification and semantic analysis:
 //! - POST /api/v1/privacy/classify   — regex-based classification
 //! - POST /api/v1/privacy/analyze    — semantic PII disclosure detection
-//! - POST /api/v1/privacy/scan       — combined scan (regex + semantic + compliance)
-//! - GET  /api/v1/privacy/compliance/frameworks — list available frameworks
-//! - GET  /api/v1/privacy/compliance/rules      — list rules (filterable by framework)
+//! - POST /api/v1/privacy/scan       — combined scan (regex + semantic)
 
 use crate::config::SensitivityLevel;
-use crate::error::to_json;
-use crate::events::types::ApiError;
 use crate::privacy::classifier::Classifier;
-use crate::privacy::compliance::{ComplianceEngine, ComplianceFramework};
 use crate::privacy::semantic::{SemanticAnalyzer, SemanticMatch};
-use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -29,7 +17,6 @@ use std::sync::Arc;
 pub struct PrivacyState {
     pub classifier: Arc<Classifier>,
     pub semantic: Arc<SemanticAnalyzer>,
-    pub compliance: Arc<ComplianceEngine>,
 }
 
 /// Create the privacy router
@@ -38,11 +25,6 @@ pub fn privacy_router(state: PrivacyState) -> Router {
         .route("/api/v1/privacy/classify", post(classify))
         .route("/api/v1/privacy/analyze", post(analyze))
         .route("/api/v1/privacy/scan", post(scan))
-        .route(
-            "/api/v1/privacy/compliance/frameworks",
-            get(list_frameworks),
-        )
-        .route("/api/v1/privacy/compliance/rules", get(list_rules))
         .with_state(state)
 }
 
@@ -120,45 +102,6 @@ pub struct ScanResponse {
     pub requires_tee: bool,
     pub regex_matches: Vec<ClassifyMatch>,
     pub semantic_matches: Vec<SemanticMatchResponse>,
-    pub compliance_matches: Vec<ComplianceMatch>,
-}
-
-/// A compliance rule match
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComplianceMatch {
-    pub rule: String,
-    pub framework: String,
-    pub description: String,
-    pub level: String,
-}
-
-/// Query params for listing compliance rules
-#[derive(Debug, Deserialize)]
-pub struct RulesQuery {
-    pub framework: Option<String>,
-}
-
-/// Framework info response
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FrameworkInfo {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub rule_count: usize,
-    pub tee_mandatory: bool,
-}
-
-/// Rule info response
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuleInfo {
-    pub name: String,
-    pub framework: String,
-    pub pattern: String,
-    pub level: String,
-    pub description: String,
 }
 
 // =============================================================================
@@ -216,60 +159,28 @@ async fn analyze(
     Json(AnalyzeResponse {
         level: format!("{:?}", result.level),
         requires_tee: result.requires_tee,
-        matches: result.matches.iter().map(SemanticMatchResponse::from).collect(),
+        matches: result
+            .matches
+            .iter()
+            .map(SemanticMatchResponse::from)
+            .collect(),
     })
 }
 
-/// POST /api/v1/privacy/scan — combined scan (regex + semantic + compliance)
+/// POST /api/v1/privacy/scan — combined scan (regex + semantic)
 async fn scan(
     State(state): State<PrivacyState>,
     Json(request): Json<ClassifyRequest>,
 ) -> impl IntoResponse {
-    // Run all three analyzers
     let regex_result = state.classifier.classify(&request.text);
     let semantic_result = state.semantic.analyze(&request.text);
 
-    // Run compliance rules via regex
-    let compliance_rules = state.compliance.all_rules();
-    let mut compliance_matches = Vec::new();
-    for rule in &compliance_rules {
-        if let Ok(re) = regex::Regex::new(&rule.pattern) {
-            if re.is_match(&request.text) {
-                // Determine framework from rule name prefix
-                let framework = if rule.name.starts_with("hipaa") {
-                    "HIPAA"
-                } else if rule.name.starts_with("pci") {
-                    "PCI-DSS"
-                } else if rule.name.starts_with("gdpr") {
-                    "GDPR"
-                } else {
-                    "Custom"
-                };
-                compliance_matches.push(ComplianceMatch {
-                    rule: rule.name.clone(),
-                    framework: framework.to_string(),
-                    description: rule.description.clone(),
-                    level: format!("{:?}", rule.level),
-                });
-            }
-        }
-    }
-
-    // Determine overall level (highest of all)
     let mut max_level = regex_result.level;
     if level_rank(semantic_result.level) > level_rank(max_level) {
         max_level = semantic_result.level;
     }
-    for rule in &compliance_rules {
-        if compliance_matches.iter().any(|m| m.rule == rule.name)
-            && level_rank(rule.level) > level_rank(max_level)
-        {
-            max_level = rule.level;
-        }
-    }
 
-    let requires_tee = level_rank(max_level) >= level_rank(SensitivityLevel::Sensitive)
-        || state.compliance.tee_mandatory();
+    let requires_tee = level_rank(max_level) >= level_rank(SensitivityLevel::Sensitive);
 
     Json(ScanResponse {
         level: format!("{:?}", max_level),
@@ -290,110 +201,22 @@ async fn scan(
             .iter()
             .map(SemanticMatchResponse::from)
             .collect(),
-        compliance_matches,
     })
-}
-
-/// GET /api/v1/privacy/compliance/frameworks
-async fn list_frameworks(State(state): State<PrivacyState>) -> impl IntoResponse {
-    let mut frameworks = Vec::new();
-
-    // Always show all available frameworks with their info
-    for (framework, rule_set_fn) in [
-        (ComplianceFramework::Hipaa, crate::privacy::compliance::hipaa_rules as fn() -> _),
-        (ComplianceFramework::PciDss, crate::privacy::compliance::pci_dss_rules),
-        (ComplianceFramework::Gdpr, crate::privacy::compliance::gdpr_rules),
-    ] {
-        let rule_set = rule_set_fn();
-        let enabled = state.compliance.enabled_frameworks().contains(&framework);
-        frameworks.push(serde_json::json!({
-            "id": format!("{}", framework).to_lowercase().replace('-', "_"),
-            "name": rule_set.name,
-            "description": rule_set.description,
-            "ruleCount": rule_set.rules.len(),
-            "teeMandatory": rule_set.tee_mandatory,
-            "enabled": enabled,
-        }));
-    }
-
-    Json(frameworks)
-}
-
-/// GET /api/v1/privacy/compliance/rules?framework=hipaa
-async fn list_rules(
-    State(state): State<PrivacyState>,
-    Query(params): Query<RulesQuery>,
-) -> impl IntoResponse {
-    let rules = if let Some(fw) = &params.framework {
-        let framework = match fw.to_lowercase().as_str() {
-            "hipaa" => Some(ComplianceFramework::Hipaa),
-            "pci-dss" | "pci_dss" | "pcidss" => Some(ComplianceFramework::PciDss),
-            "gdpr" => Some(ComplianceFramework::Gdpr),
-            "custom" => Some(ComplianceFramework::Custom),
-            _ => None,
-        };
-
-        match framework {
-            Some(fw) => state.compliance.rules_for(fw),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(to_json(ApiError::bad_request(format!(
-                        "Unknown framework: {}. Valid: hipaa, pci-dss, gdpr, custom",
-                        fw
-                    )))),
-                );
-            }
-        }
-    } else {
-        state.compliance.all_rules()
-    };
-
-    let rule_infos: Vec<serde_json::Value> = rules
-        .iter()
-        .map(|r| {
-            let framework = if r.name.starts_with("hipaa") {
-                "HIPAA"
-            } else if r.name.starts_with("pci") {
-                "PCI-DSS"
-            } else if r.name.starts_with("gdpr") {
-                "GDPR"
-            } else {
-                "Custom"
-            };
-            serde_json::json!({
-                "name": r.name,
-                "framework": framework,
-                "pattern": r.pattern,
-                "level": format!("{:?}", r.level),
-                "description": r.description,
-            })
-        })
-        .collect();
-
-    (StatusCode::OK, Json(to_json(rule_infos)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::privacy::compliance;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     fn make_state() -> PrivacyState {
         let classifier = Arc::new(Classifier::new(vec![], SensitivityLevel::Normal).unwrap());
         let semantic = Arc::new(SemanticAnalyzer::new());
-        let compliance = Arc::new(ComplianceEngine::with_frameworks(&[
-            ComplianceFramework::Hipaa,
-            ComplianceFramework::PciDss,
-            ComplianceFramework::Gdpr,
-        ]));
         PrivacyState {
             classifier,
             semantic,
-            compliance,
         }
     }
 
@@ -482,9 +305,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/privacy/scan")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"text":"my password is hunter2 and my IP is 192.168.1.1"}"#,
-                    ))
+                    .body(Body::from(r#"{"text":"my password is hunter2"}"#))
                     .unwrap(),
             )
             .await
@@ -493,86 +314,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["requiresTee"], true);
-        // Should have semantic match for password
         assert!(!json["semanticMatches"].as_array().unwrap().is_empty());
-        // Should have compliance match for IP (GDPR)
-        assert!(!json["complianceMatches"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_list_frameworks() {
-        let app = make_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/privacy/compliance/frameworks")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
-        assert!(arr.iter().any(|f| f["name"] == "HIPAA PHI Detection"));
-    }
-
-    #[tokio::test]
-    async fn test_list_rules_all() {
-        let app = make_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/privacy/compliance/rules")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        let arr = json.as_array().unwrap();
-        assert!(arr.len() > 10); // HIPAA + PCI-DSS + GDPR rules
-    }
-
-    #[tokio::test]
-    async fn test_list_rules_by_framework() {
-        let app = make_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/privacy/compliance/rules?framework=hipaa")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
-        let arr = json.as_array().unwrap();
-        assert!(!arr.is_empty());
-        for rule in arr {
-            assert_eq!(rule["framework"], "HIPAA");
-        }
-    }
-
-    #[tokio::test]
-    async fn test_list_rules_unknown_framework() {
-        let app = make_app();
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/privacy/compliance/rules?framework=unknown")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

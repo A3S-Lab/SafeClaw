@@ -66,6 +66,18 @@ pub trait ChannelAdapter: Send + Sync {
     /// Edit a message
     async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()>;
 
+    /// Edit a message with a custom card JSON (for interactive card updates)
+    async fn edit_message_card(
+        &self,
+        _chat_id: &str,
+        message_id: &str,
+        card: &serde_json::Value,
+    ) -> Result<()> {
+        // Default: fall back to edit_message with a text representation
+        self.edit_message(_chat_id, message_id, &card.to_string())
+            .await
+    }
+
     /// Delete a message
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()>;
 

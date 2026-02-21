@@ -83,7 +83,9 @@ mod security_level_tests {
 
     #[test]
     fn test_security_level_display() {
-        assert!(SecurityLevel::TeeHardware.description().contains("Hardware TEE"));
+        assert!(SecurityLevel::TeeHardware
+            .description()
+            .contains("Hardware TEE"));
         assert!(SecurityLevel::ProcessOnly.description().contains("no VM"));
     }
 

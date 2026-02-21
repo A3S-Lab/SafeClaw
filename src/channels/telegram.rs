@@ -6,7 +6,9 @@
 //! API Reference: https://core.telegram.org/bots/api
 
 use super::adapter::{AdapterBase, AdapterStatus, ChannelAdapter, ChannelEvent};
-use super::message::{InboundMessage, MessageAttachment, AttachmentType, MessageFormat, OutboundMessage};
+use super::message::{
+    AttachmentType, InboundMessage, MessageAttachment, MessageFormat, OutboundMessage,
+};
 use crate::config::TelegramConfig;
 use crate::error::{Error, Result};
 use async_trait::async_trait;
@@ -46,14 +48,9 @@ impl TelegramAdapter {
         self.config.allowed_users.is_empty() || self.config.allowed_users.contains(&user_id)
     }
 
-    /// Resolve the bot token from environment variable
+    /// Resolve the bot token from env var or inline value
     fn resolve_token(&self) -> Result<String> {
-        std::env::var(&self.config.bot_token_ref).map_err(|_| {
-            Error::Channel(format!(
-                "Telegram bot token env var '{}' not set",
-                self.config.bot_token_ref
-            ))
-        })
+        super::resolve_credential(&self.config.bot_token)
     }
 
     /// Build API URL for a method
@@ -62,15 +59,11 @@ impl TelegramAdapter {
     }
 
     /// Call Telegram Bot API and return the result
-    async fn api_call(
-        &self,
-        method: &str,
-        body: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    async fn api_call(&self, method: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let token = self.bot_token.read().await;
-        let token = token.as_ref().ok_or_else(|| {
-            Error::Channel("Telegram bot token not resolved".to_string())
-        })?;
+        let token = token
+            .as_ref()
+            .ok_or_else(|| Error::Channel("Telegram bot token not resolved".to_string()))?;
 
         let url = Self::api_url(token, method);
         let resp = self
@@ -100,7 +93,9 @@ impl TelegramAdapter {
 
     /// Parse a Telegram Update into an InboundMessage
     fn parse_update(&self, update: &serde_json::Value) -> Option<InboundMessage> {
-        let message = update.get("message").or_else(|| update.get("edited_message"))?;
+        let message = update
+            .get("message")
+            .or_else(|| update.get("edited_message"))?;
 
         let from = message.get("from")?;
         let user_id = from["id"].as_i64()?;
@@ -234,9 +229,12 @@ impl TelegramAdapter {
                                 // Check for edited message
                                 if update.get("edited_message").is_some() {
                                     if let Some(msg) = update.get("edited_message") {
-                                        let chat_id = msg["chat"]["id"].as_i64().unwrap_or(0).to_string();
-                                        let message_id = msg["message_id"].as_i64().unwrap_or(0).to_string();
-                                        let new_content = msg["text"].as_str().unwrap_or("").to_string();
+                                        let chat_id =
+                                            msg["chat"]["id"].as_i64().unwrap_or(0).to_string();
+                                        let message_id =
+                                            msg["message_id"].as_i64().unwrap_or(0).to_string();
+                                        let new_content =
+                                            msg["text"].as_str().unwrap_or("").to_string();
                                         let _ = event_tx
                                             .send(ChannelEvent::MessageEdited {
                                                 channel: "telegram".to_string(),
@@ -393,10 +391,7 @@ impl ChannelAdapter for TelegramAdapter {
 
         let result = self.api_call("sendMessage", &body).await?;
 
-        let message_id = result["message_id"]
-            .as_i64()
-            .unwrap_or(0)
-            .to_string();
+        let message_id = result["message_id"].as_i64().unwrap_or(0).to_string();
 
         Ok(message_id)
     }
@@ -458,7 +453,7 @@ mod tests {
 
     fn create_test_config() -> TelegramConfig {
         TelegramConfig {
-            bot_token_ref: "test_token".to_string(),
+            bot_token: "test_token".to_string(),
             allowed_users: vec![123456789],
             dm_policy: "pairing".to_string(),
         }
@@ -485,7 +480,7 @@ mod tests {
     #[test]
     fn test_empty_allowed_users() {
         let config = TelegramConfig {
-            bot_token_ref: "test_token".to_string(),
+            bot_token: "test_token".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
         };
@@ -517,7 +512,7 @@ mod tests {
     #[test]
     fn test_parse_update_private_message() {
         let config = TelegramConfig {
-            bot_token_ref: "test".to_string(),
+            bot_token: "test".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
         };
@@ -554,7 +549,7 @@ mod tests {
     #[test]
     fn test_parse_update_group_mention() {
         let config = TelegramConfig {
-            bot_token_ref: "test".to_string(),
+            bot_token: "test".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
         };
@@ -580,7 +575,7 @@ mod tests {
     #[test]
     fn test_parse_update_with_reply() {
         let config = TelegramAdapter::new(TelegramConfig {
-            bot_token_ref: "test".to_string(),
+            bot_token: "test".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
         });
@@ -603,7 +598,7 @@ mod tests {
     #[test]
     fn test_parse_update_filtered_user() {
         let config = TelegramConfig {
-            bot_token_ref: "test".to_string(),
+            bot_token: "test".to_string(),
             allowed_users: vec![99999],
             dm_policy: "pairing".to_string(),
         };
@@ -625,7 +620,7 @@ mod tests {
     #[test]
     fn test_parse_update_with_photo() {
         let config = TelegramAdapter::new(TelegramConfig {
-            bot_token_ref: "test".to_string(),
+            bot_token: "test".to_string(),
             allowed_users: vec![],
             dm_policy: "open".to_string(),
         });
