@@ -63,6 +63,10 @@ pub struct SafeClawConfig {
     /// Skills configuration
     #[serde(default)]
     pub skills: SkillsConfig,
+
+    /// Session lifecycle management configuration
+    #[serde(default)]
+    pub session_lifecycle: SessionLifecycleConfig,
 }
 
 impl SafeClawConfig {
@@ -705,6 +709,47 @@ impl Default for SkillsConfig {
         Self {
             dir: Self::default_dir(),
             auto_load: Self::default_auto_load(),
+        }
+    }
+}
+
+/// Session lifecycle management configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLifecycleConfig {
+    /// Seconds of inactivity before auto-archiving (default: 30 min)
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    /// Seconds after archival before purging (default: 7 days)
+    #[serde(default = "default_purge_after")]
+    pub purge_after_secs: u64,
+    /// Maximum number of active sessions (default: 100)
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+    /// Cleanup scan interval in seconds (default: 60)
+    #[serde(default = "default_cleanup_interval")]
+    pub cleanup_interval_secs: u64,
+}
+
+fn default_idle_timeout() -> u64 {
+    1800
+}
+fn default_purge_after() -> u64 {
+    604800
+}
+fn default_max_sessions() -> usize {
+    100
+}
+fn default_cleanup_interval() -> u64 {
+    60
+}
+
+impl Default for SessionLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_secs: default_idle_timeout(),
+            purge_after_secs: default_purge_after(),
+            max_sessions: default_max_sessions(),
+            cleanup_interval_secs: default_cleanup_interval(),
         }
     }
 }

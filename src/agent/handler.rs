@@ -46,6 +46,14 @@ pub fn agent_router(state: AgentState) -> Router {
             put(set_auto_execute),
         )
         .route("/api/agent/sessions/:id/configure", post(configure_session))
+        // Lifecycle endpoints
+        .route("/api/agent/sessions/:id/archive", post(archive_session))
+        .route(
+            "/api/agent/sessions/:id/unarchive",
+            post(unarchive_session),
+        )
+        .route("/api/agent/stats", get(session_stats))
+        .route("/api/agent/directory", get(agent_directory))
         // Slash commands
         .route("/api/agent/commands", get(list_commands))
         // Config endpoints
@@ -339,7 +347,39 @@ async fn put_config(
         match serde_json::from_value::<Vec<a3s_code::config::ProviderConfig>>(
             serde_json::Value::Array(providers_json),
         ) {
-            Ok(providers) => cfg.providers = providers,
+            Ok(new_providers) => {
+                // Merge: preserve existing apiKey/baseUrl when incoming value is None.
+                // The frontend sends None when it doesn't have credentials (they may
+                // have been set via env() in HCL or direct file edit).
+                let old_providers = &cfg.providers;
+                let merged: Vec<a3s_code::config::ProviderConfig> = new_providers
+                    .into_iter()
+                    .map(|mut np| {
+                        if let Some(op) = old_providers.iter().find(|p| p.name == np.name) {
+                            // Preserve provider-level credentials if incoming is None
+                            if np.api_key.is_none() {
+                                np.api_key = op.api_key.clone();
+                            }
+                            if np.base_url.is_none() {
+                                np.base_url = op.base_url.clone();
+                            }
+                            // Preserve model-level credentials if incoming is None
+                            for nm in &mut np.models {
+                                if let Some(om) = op.models.iter().find(|m| m.id == nm.id) {
+                                    if nm.api_key.is_none() {
+                                        nm.api_key = om.api_key.clone();
+                                    }
+                                    if nm.base_url.is_none() {
+                                        nm.base_url = om.base_url.clone();
+                                    }
+                                }
+                            }
+                        }
+                        np
+                    })
+                    .collect();
+                cfg.providers = merged;
+            }
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -540,6 +580,58 @@ async fn configure_session(
             Json(serde_json::json!({"error": e.to_string()})),
         ),
     }
+}
+
+// =============================================================================
+// Lifecycle handlers
+// =============================================================================
+
+/// Archive a session
+async fn archive_session(
+    State(state): State<AgentState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.engine.get_session(&id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        );
+    }
+    state.engine.set_archived(&id, true).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "archived": true})),
+    )
+}
+
+/// Unarchive a session
+async fn unarchive_session(
+    State(state): State<AgentState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.engine.get_session(&id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        );
+    }
+    state.engine.set_archived(&id, false).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "archived": false})),
+    )
+}
+
+/// GET /api/agent/stats — session statistics
+async fn session_stats(State(state): State<AgentState>) -> impl IntoResponse {
+    let stats = state.engine.session_stats().await;
+    Json(stats)
+}
+
+/// GET /api/agent/directory — agent discovery directory
+async fn agent_directory(State(state): State<AgentState>) -> impl IntoResponse {
+    let directory = state.engine.list_agent_directory().await;
+    Json(directory)
 }
 
 // =============================================================================

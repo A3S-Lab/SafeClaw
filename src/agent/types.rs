@@ -274,6 +274,45 @@ pub struct PersonaInfo {
     pub version: Option<String>,
 }
 
+/// Session statistics for the stats API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStats {
+    pub active: u32,
+    pub archived: u32,
+    pub with_browsers: u32,
+    pub generating: u32,
+    pub total: u32,
+    pub total_cost_usd: f64,
+}
+
+/// Agent-to-agent message type for structured collaboration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMessageType {
+    /// Normal conversation
+    Chat,
+    /// Task request (expects a response)
+    TaskRequest,
+    /// Response to a task request
+    TaskResponse,
+}
+
+impl Default for AgentMessageType {
+    fn default() -> Self {
+        Self::Chat
+    }
+}
+
+/// Entry in the agent directory (discoverable agents)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentDirectoryEntry {
+    pub session_id: String,
+    pub persona_id: Option<String>,
+    pub persona_name: Option<String>,
+    pub status: String,
+    pub auto_execute: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

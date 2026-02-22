@@ -336,6 +336,7 @@ async fn run_gateway(
 
     let models = config.models.clone();
     let skills_config = config.skills.clone();
+    let lifecycle_config = config.session_lifecycle.clone();
 
     // Initialize shared memory store early — shared between agent runtime and API layer
     let memory_dir = dirs::config_dir()
@@ -373,6 +374,11 @@ async fn run_gateway(
         tracing::info!("AgentBus started (in-memory provider)");
     }
 
+    // Start session lifecycle background task
+    agent_state
+        .engine
+        .start_lifecycle_task(lifecycle_config);
+
     gateway.start().await?;
 
     let gateway = std::sync::Arc::new(gateway);
@@ -402,6 +408,7 @@ async fn run_gateway(
     let channel_config_store =
         safeclaw::config::ChannelAgentConfigStore::new(channel_config_dir).await;
 
+    let engine_for_shutdown = agent_state.engine.clone();
     let app = build_app(
         gateway.clone(),
         agent_state,
@@ -427,6 +434,7 @@ async fn run_gateway(
         .context("HTTP server error")?;
 
     tracing::info!("Shutting down...");
+    engine_for_shutdown.shutdown().await;
     gateway.stop().await?;
 
     Ok(())
@@ -476,6 +484,11 @@ async fn run_serve(
     }
     gateway.set_agent_engine(agent_state.engine.clone()).await;
 
+    // Start session lifecycle background task
+    agent_state
+        .engine
+        .start_lifecycle_task(config.session_lifecycle.clone());
+
     gateway.start().await?;
 
     // Build audit state from gateway's shared log and alert monitor
@@ -502,6 +515,7 @@ async fn run_serve(
     let channel_config_store =
         safeclaw::config::ChannelAgentConfigStore::new(channel_config_dir).await;
 
+    let engine_for_shutdown = agent_state.engine.clone();
     let app = build_app(
         gateway.clone(),
         agent_state,
@@ -530,6 +544,7 @@ async fn run_serve(
         .context("HTTP server error")?;
 
     tracing::info!("Shutting down...");
+    engine_for_shutdown.shutdown().await;
     gateway.stop().await?;
 
     Ok(())

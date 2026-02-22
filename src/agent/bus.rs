@@ -14,7 +14,7 @@
 //! - `confirm` (default): browser receives `AgentMessage` notification; user approves
 
 use crate::agent::engine::AgentEngine;
-use crate::agent::types::BrowserIncomingMessage;
+use crate::agent::types::{AgentMessageType, BrowserIncomingMessage};
 use a3s_event::EventBus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,9 +28,19 @@ use tokio::sync::RwLock;
 /// Payload carried in agent-to-agent event bus messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMessagePayload {
+    /// Unique message ID
+    pub message_id: String,
     pub from_session_id: String,
     pub topic: String,
     pub content: String,
+    /// Message type: chat, task_request, task_response
+    #[serde(default)]
+    pub message_type: AgentMessageType,
+    /// ID of the message this is replying to (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// Unix timestamp (seconds)
+    pub timestamp: u64,
 }
 
 // =============================================================================
@@ -43,7 +53,14 @@ pub struct AgentBus {
     event_bus: Arc<EventBus>,
     /// Per-session auto-execute flag (default: false = confirm mode)
     auto_execute: Arc<RwLock<HashMap<String, bool>>>,
+    /// Per-session rate limiter: (count, window_start_secs)
+    rate_limits: Arc<RwLock<HashMap<String, (u32, u64)>>>,
 }
+
+/// Maximum auto-execute messages per session per minute
+const RATE_LIMIT_PER_MINUTE: u32 = 30;
+/// Maximum reconnection backoff in seconds
+const MAX_RECONNECT_BACKOFF_SECS: u64 = 30;
 
 impl AgentBus {
     /// Create a new `AgentBus`.
@@ -52,6 +69,7 @@ impl AgentBus {
             engine,
             event_bus,
             auto_execute: Arc::new(RwLock::new(HashMap::new())),
+            rate_limits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -95,10 +113,19 @@ impl AgentBus {
             )));
         };
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         let payload = AgentMessagePayload {
+            message_id: uuid::Uuid::new_v4().to_string(),
             from_session_id: from_session_id.to_string(),
             topic: topic_label,
             content: content.to_string(),
+            message_type: AgentMessageType::default(),
+            reply_to: None,
+            timestamp: now,
         };
 
         self.event_bus
@@ -135,101 +162,125 @@ impl AgentBus {
     }
 
     // =========================================================================
-    // Subscription loops
+    // Subscription loops (with auto-reconnect)
     // =========================================================================
 
     async fn run_broadcast_loop(&self) {
-        // Subscribe to all broadcast messages
-        let broadcast_subject = self
-            .event_bus
-            .provider_arc()
-            .build_subject("agent", "broadcast.>");
-
-        let mut sub = match self
-            .event_bus
-            .provider_arc()
-            .subscribe(&broadcast_subject)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("AgentBus: failed to subscribe to broadcast: {}", e);
-                return;
-            }
-        };
-
-        tracing::info!(subject = %broadcast_subject, "AgentBus: broadcast subscription started");
-
+        let mut attempts = 0u32;
         loop {
-            match sub.next().await {
-                Ok(Some(received)) => {
-                    if let Ok(payload) = serde_json::from_value::<AgentMessagePayload>(
-                        received.event.payload.clone(),
-                    ) {
-                        self.deliver_to_all_sessions(&payload).await;
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("AgentBus: broadcast subscription closed");
-                    break;
+            let broadcast_subject = self
+                .event_bus
+                .provider_arc()
+                .build_subject("agent", "broadcast.>");
+
+            let mut sub = match self
+                .event_bus
+                .provider_arc()
+                .subscribe(&broadcast_subject)
+                .await
+            {
+                Ok(s) => {
+                    attempts = 0;
+                    tracing::info!(subject = %broadcast_subject, "AgentBus: broadcast subscription started");
+                    s
                 }
                 Err(e) => {
-                    tracing::warn!("AgentBus: broadcast receive error: {}", e);
+                    tracing::error!("AgentBus: failed to subscribe to broadcast: {}", e);
+                    let delay = std::cmp::min(1u64 << attempts, MAX_RECONNECT_BACKOFF_SECS);
+                    attempts = attempts.saturating_add(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+            };
+
+            loop {
+                match sub.next().await {
+                    Ok(Some(received)) => {
+                        if let Ok(payload) = serde_json::from_value::<AgentMessagePayload>(
+                            received.event.payload.clone(),
+                        ) {
+                            self.deliver_to_all_sessions(&payload).await;
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!("AgentBus: broadcast subscription closed, reconnecting...");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("AgentBus: broadcast receive error: {}", e);
+                    }
                 }
             }
+
+            // Reconnect with backoff
+            let delay = std::cmp::min(1u64 << attempts, MAX_RECONNECT_BACKOFF_SECS);
+            attempts = attempts.saturating_add(1);
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
         }
     }
 
     async fn run_mention_loop(&self) {
-        // Subscribe to all mention messages (we filter by session_id on delivery)
-        let mention_subject = self
-            .event_bus
-            .provider_arc()
-            .build_subject("agent", "mention.>");
-
-        let mut sub = match self
-            .event_bus
-            .provider_arc()
-            .subscribe(&mention_subject)
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("AgentBus: failed to subscribe to mentions: {}", e);
-                return;
-            }
-        };
-
-        tracing::info!(subject = %mention_subject, "AgentBus: mention subscription started");
-
+        let mut attempts = 0u32;
         loop {
-            match sub.next().await {
-                Ok(Some(received)) => {
-                    if let Ok(payload) = serde_json::from_value::<AgentMessagePayload>(
-                        received.event.payload.clone(),
-                    ) {
-                        // Extract target session_id from subject: events.agent.mention.<session_id>
-                        let target_session_id = received
-                            .event
-                            .subject
-                            .split('.')
-                            .last()
-                            .unwrap_or("")
-                            .to_string();
+            let mention_subject = self
+                .event_bus
+                .provider_arc()
+                .build_subject("agent", "mention.>");
 
-                        if !target_session_id.is_empty() {
-                            self.deliver_to_session(&target_session_id, &payload).await;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    tracing::warn!("AgentBus: mention subscription closed");
-                    break;
+            let mut sub = match self
+                .event_bus
+                .provider_arc()
+                .subscribe(&mention_subject)
+                .await
+            {
+                Ok(s) => {
+                    attempts = 0;
+                    tracing::info!(subject = %mention_subject, "AgentBus: mention subscription started");
+                    s
                 }
                 Err(e) => {
-                    tracing::warn!("AgentBus: mention receive error: {}", e);
+                    tracing::error!("AgentBus: failed to subscribe to mentions: {}", e);
+                    let delay = std::cmp::min(1u64 << attempts, MAX_RECONNECT_BACKOFF_SECS);
+                    attempts = attempts.saturating_add(1);
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+            };
+
+            loop {
+                match sub.next().await {
+                    Ok(Some(received)) => {
+                        if let Ok(payload) = serde_json::from_value::<AgentMessagePayload>(
+                            received.event.payload.clone(),
+                        ) {
+                            // Extract target session_id from subject: events.agent.mention.<session_id>
+                            let target_session_id = received
+                                .event
+                                .subject
+                                .split('.')
+                                .last()
+                                .unwrap_or("")
+                                .to_string();
+
+                            if !target_session_id.is_empty() {
+                                self.deliver_to_session(&target_session_id, &payload).await;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!("AgentBus: mention subscription closed, reconnecting...");
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("AgentBus: mention receive error: {}", e);
+                    }
                 }
             }
+
+            // Reconnect with backoff
+            let delay = std::cmp::min(1u64 << attempts, MAX_RECONNECT_BACKOFF_SECS);
+            attempts = attempts.saturating_add(1);
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
         }
     }
 
@@ -252,9 +303,28 @@ impl AgentBus {
     /// Deliver a message to a specific session.
     async fn deliver_to_session(&self, session_id: &str, payload: &AgentMessagePayload) {
         let auto = self.get_auto_execute(session_id).await;
-        let message_id = uuid::Uuid::new_v4().to_string();
+        let message_id = payload.message_id.clone();
 
         if auto {
+            // Rate limit check for auto-execute
+            if !self.check_rate_limit(session_id).await {
+                tracing::warn!(
+                    session_id,
+                    from = %payload.from_session_id,
+                    "AgentBus: auto-execute rate limited, falling back to confirm mode"
+                );
+                // Fall through to confirm mode
+                let msg = BrowserIncomingMessage::AgentMessage {
+                    message_id,
+                    from_session_id: payload.from_session_id.clone(),
+                    topic: payload.topic.clone(),
+                    content: payload.content.clone(),
+                    auto_execute: false,
+                };
+                self.engine.broadcast_to_session(session_id, &msg).await;
+                return;
+            }
+
             // Auto mode: feed directly into agent generation
             tracing::debug!(
                 session_id,
@@ -279,6 +349,33 @@ impl AgentBus {
             };
             self.engine.broadcast_to_session(session_id, &msg).await;
         }
+    }
+
+    /// Check and update rate limit for auto-execute on a session.
+    /// Returns `true` if the message is allowed, `false` if rate limited.
+    async fn check_rate_limit(&self, session_id: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut limits = self.rate_limits.write().await;
+        let entry = limits
+            .entry(session_id.to_string())
+            .or_insert((0, now));
+
+        // Reset window if more than 60 seconds have passed
+        if now.saturating_sub(entry.1) >= 60 {
+            entry.0 = 0;
+            entry.1 = now;
+        }
+
+        if entry.0 >= RATE_LIMIT_PER_MINUTE {
+            return false;
+        }
+
+        entry.0 += 1;
+        true
     }
 }
 
