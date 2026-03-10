@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-dmg:
-    name: Build Universal macOS DMG
+    name: Build macOS DMG (arm64)
     runs-on: macos-latest
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -84,7 +84,7 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-      - name: Build universal DMG
+      - name: Build DMG
         working-directory: a3s/apps/safeclaw
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
@@ -95,13 +95,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri build --target universal-apple-darwin
+        run: pnpm tauri build --bundles dmg
 
       - name: Locate DMG
         id: dmg
         working-directory: a3s/apps/safeclaw
         run: |
-          DMG_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -name '*.dmg' | head -1)"
+          DMG_PATH="$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)"
           echo "path=$DMG_PATH" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$DMG_PATH")" >> "$GITHUB_OUTPUT"
 
